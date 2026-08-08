@@ -21,17 +21,20 @@ plugins {
 android {
     namespace = "com.recorderx.app"
 
-    // Android 17 (API 37) is current stable as of this build. AGP 9.3 supports
-    // up to API 37, and Play Console requires targeting API 36+ for new
-    // submissions starting August 2026, so 37 keeps headroom.
-    compileSdk = 37
+    // Using API 36 for now: even though Android 17 (API 37) has shipped,
+    // Google hasn't published the `platforms;android-37` SDK package to the
+    // sdkmanager repository yet, so CI can't install it (fails with
+    // "Failed to find package 'platforms;android-37'"). Play Console doesn't
+    // require API 37 targeting until August 2027, so 36 is safe for now --
+    // bump back to 37 once the platform package is actually published.
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.recorderx.app"
 
         // Hard requirement from the spec: Android 8.0 (Oreo) and up.
         minSdk = 26
-        targetSdk = 37
+        targetSdk = 36
 
         versionCode = 1
         versionName = "1.0.0"
