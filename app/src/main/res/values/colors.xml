@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base surface -->
+    <color name="background">#FAFAF8</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="divider">#EEEEEC</color>
+
+    <!-- Accent (the single yellow used everywhere: fills, borders, the CTA) -->
+    <color name="accent_yellow">#F5B301</color>
+    <color name="accent_yellow_pressed">#DA9F00</color>
+    <color name="accent_yellow_faint">#FDF1D2</color>
+
+    <!-- Text -->
+    <color name="text_primary">#17140D</color>
+    <color name="text_secondary">#8C8A84</color>
+    <color name="text_on_accent">#17140D</color>
+
+    <!-- Slider -->
+    <color name="track_background">#EAE8E3</color>
+    <color name="thumb_color">#17140D</color>
+    <color name="tick_on_fill">#59FFFFFF</color>
+    <color name="tick_on_track">#29000000</color>
+
+    <!-- Status -->
+    <color name="danger_red">#E5484D</color>
+    <color name="success_green">#2E9E5B</color>
+
+    <!-- Adaptive launcher icon -->
+    <color name="ic_launcher_background">#17140D</color>
+</resources>

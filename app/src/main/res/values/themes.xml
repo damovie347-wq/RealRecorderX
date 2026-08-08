@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Light-only theme by design: the reference UI is a single, deliberate light
+      aesthetic, not a light/dark pair. DayNight is a reasonable v2 addition
+      (see ARCHITECTURE.md) but isn't guessed at here.
+    -->
+    <style name="Theme.RecorderX" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/accent_yellow</item>
+        <item name="colorPrimaryDark">@color/accent_yellow_pressed</item>
+        <item name="colorAccent">@color/accent_yellow</item>
+        <item name="colorControlActivated">@color/accent_yellow</item>
+
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:statusBarColor">@color/background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@color/background</item>
+
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:fontFamily">sans-serif</item>
+
+        <!-- No window content transitions / shared-element machinery: this is a
+             single-screen app, so we don't pay for animation infrastructure we
+             don't use. -->
+        <item name="android:windowActivityTransitions">false</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="elevationOverlayEnabled">false</item>
+    </style>
+
+    <!-- Used only by the tiny recording-controls overlay window (see
+         overlay/RecordingOverlayController.kt), never by an Activity. -->
+    <style name="Theme.RecorderX.Overlay" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
+        <item name="android:fontFamily">sans-serif</item>
+    </style>
+</resources>

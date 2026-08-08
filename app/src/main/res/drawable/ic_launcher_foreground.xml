@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple "record" glyph: a ring + a solid dot, entirely vector (near-zero
+     APK weight, crisp at any density) — deliberately avoids a raster mipmap set. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:pathData="M26,54 A28,28 0 1,1 82,54 A28,28 0 1,1 26,54 Z"
+        android:strokeColor="#F5B301"
+        android:strokeWidth="4"
+        android:fillColor="#00000000" />
+
+    <path
+        android:pathData="M38,54 A16,16 0 1,1 70,54 A16,16 0 1,1 38,54 Z"
+        android:fillColor="#F5B301" />
+</vector>

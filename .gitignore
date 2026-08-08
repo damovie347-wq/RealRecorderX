@@ -1,0 +1,43 @@
+# Build outputs
+/build/
+/app/build/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Local machine config -- never portable, never committed
+local.properties
+
+# Gradle
+.gradle/
+gradle-app.setting
+
+# The wrapper *scripts* (gradlew/gradlew.bat) and the wrapper *jar* are
+# intentionally not committed in this repo -- see README.md ("Gradle Wrapper")
+# for why. CI regenerates them on every run via `gradle wrapper`.
+/gradlew
+/gradlew.bat
+/gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Signing material -- release signing must ONLY ever come from GitHub Secrets,
+# never from a file in the repo. These patterns exist as a safety net in case
+# someone drops a keystore in the project dir by habit.
+*.jks
+*.keystore
+release.keystore
+keystore.properties

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RecorderX</string>
+
+    <!-- Top bar -->
+    <string name="saved_in_prefix">Saved in:</string>
+    <string name="nav_open_last">OPEN LAST RECORDING</string>
+    <string name="nav_guide">GUIDE</string>
+
+    <!-- Section headers -->
+    <string name="section_video">VIDEO SUBSYSTEM</string>
+    <string name="section_audio">AUDIO SUBSYSTEM</string>
+
+    <string name="label_floating_bubble">FLOATING BUBBLE CONTROLS</string>
+    <string name="label_advanced_bitrate_toggle">ADVANCED BITRATE (UP TO 100+ MBPS)</string>
+
+    <!-- Slider section titles -->
+    <string name="label_video_codec">VIDEO CODEC</string>
+    <string name="label_orientation">ORIENTATION</string>
+    <string name="label_resolution">RESOLUTION</string>
+    <string name="label_frame_rate">FRAME RATE</string>
+    <string name="label_bitrate">BITRATE</string>
+    <string name="label_bitrate_suggested">Suggested for your current settings: %1$s</string>
+    <string name="label_bitrate_mode">BITRATE MODE</string>
+
+    <string name="label_audio_source">AUDIO SOURCE</string>
+    <string name="label_audio_quality">AUDIO QUALITY</string>
+    <string name="label_audio_channel">AUDIO CHANNEL</string>
+    <string name="label_mic_gain">MICROPHONE GAIN</string>
+    <string name="label_voice_priority">VOICE PRIORITY</string>
+    <string name="label_system_level">SYSTEM AUDIO LEVEL — %1$d%%</string>
+    <string name="label_mic_level">MICROPHONE LEVEL — %1$d%%</string>
+    <string name="label_audio_mix">AUDIO MIX</string>
+    <string name="label_audio_monitoring">AUDIO MONITORING</string>
+
+    <!-- Output template -->
+    <string name="output_template_hint">OUTPUT TEMPLATE</string>
+    <string name="output_template_help">Type your preferred prefix in the template box to personalize your saved video titles. Add the {timestamp} placeholder to ensure every file is organized sequentially by date. Invalid characters are stripped automatically, defaulting to a clean timestamp if empty. Format: yyyyMMdd_HHmmss (e.g. 20260712_143000).</string>
+
+    <!-- CTA -->
+    <string name="start_recording">START RECORDING</string>
+    <string name="stop_recording">STOP</string>
+    <string name="pause_recording">PAUSE</string>
+    <string name="resume_recording">RESUME</string>
+    <string name="recording_elapsed">%1$s</string>
+
+    <!-- Notification -->
+    <string name="notification_channel_name">Recording</string>
+    <string name="notification_channel_description">Ongoing screen-recording status</string>
+    <string name="notification_recording_title">RecorderX is recording</string>
+    <string name="notification_recording_text">%1$s · tap to open, or use the floating controls</string>
+    <string name="notification_paused_text">Paused · %1$s</string>
+
+    <!-- Permission / capability messaging -->
+    <string name="permission_rationale_overlay">RecorderX needs the \"draw over other apps\" permission so the recording controls can stay off the recording itself.</string>
+    <string name="toast_mic_denied">Microphone permission denied — recording system audio only.</string>
+    <string name="toast_no_hardware_encoder">No hardware video encoder matched these settings; falling back to the most compatible software encoder. Expect higher CPU use.</string>
+    <string name="toast_no_last_recording">No recordings yet.</string>
+    <string name="toast_recording_saved">Saved to Movies/RecorderX</string>
+    <string name="toast_storage_permission_needed">Storage permission is needed to save recordings on this Android version.</string>
+    <string name="error_could_not_start">Couldn\'t start recording on this device (no usable encoder or output location).</string>
+
+    <string name="guide_title">Quick guide</string>
+    <string name="guide_body">1) Pick your video and audio settings below — Bitrate updates automatically as you change Resolution/FPS/Codec.\n2) Tap Start Recording, then grant screen-capture and (if you enabled a mic source) microphone permission.\n3) Use the small floating bubble to pause, resume, or stop — it never appears in the recording itself.\n4) Files save to Movies/RecorderX and are named from your Output Template.</string>
+    <string name="guide_close">GOT IT</string>
+</resources>

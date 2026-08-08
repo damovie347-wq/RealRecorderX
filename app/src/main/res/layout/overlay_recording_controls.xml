@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/overlayRoot"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:background="@drawable/bg_overlay_pill"
+    android:paddingStart="14dp"
+    android:paddingEnd="6dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="8dp"
+    android:elevation="6dp">
+
+    <View
+        android:layout_width="10dp"
+        android:layout_height="10dp"
+        android:background="@drawable/dot_recording" />
+
+    <TextView
+        android:id="@+id/txtElapsed"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="10dp"
+        android:fontFamily="sans-serif-medium"
+        android:textColor="#FFFFFF"
+        android:textSize="13sp"
+        android:text="00:00" />
+
+    <ImageButton
+        android:id="@+id/btnPauseResume"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:background="@android:color/transparent"
+        android:src="@drawable/ic_pause"
+        android:contentDescription="@string/pause_recording"
+        android:padding="6dp" />
+
+    <ImageButton
+        android:id="@+id/btnStop"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:layout_marginStart="2dp"
+        android:background="@android:color/transparent"
+        android:src="@drawable/ic_stop"
+        android:contentDescription="@string/stop_recording"
+        android:padding="6dp" />
+
+</LinearLayout>

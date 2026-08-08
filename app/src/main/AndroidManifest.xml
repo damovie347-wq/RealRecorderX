@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Mic capture AND system-audio playback capture (AudioPlaybackCaptureConfiguration
+         is built on top of AudioRecord) both require this single permission. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Foreground service so capture keeps running while the user leaves the app. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- Android 13+ requires runtime consent to show the foreground-service notification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- "Draw over other apps" — needed for the recording control bubble
+         (overlay/RecordingOverlayController.kt), which is deliberately NOT
+         part of any Activity/window that MediaProjection could capture. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Only needed pre-scoped-storage. From Android 10 (API 29) onward, saving
+         into MediaStore's Movies collection needs no storage permission at all,
+         so this is capped at 28 and simply isn't requested on newer devices. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!-- Recording a silent screen (Audio Source = Off) is a fully supported mode,
+         so the mic is a soft dependency, not a hard device requirement. -->
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+
+    <application
+        android:name=".App"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.RecorderX"
+        android:extractNativeLibs="false"
+        android:hardwareAccelerated="true">
+
+        <!--
+          No android:screenOrientation and no resizeableActivity="false" here on
+          purpose: Android 17 (targetSdk 37) makes large-screen adaptivity
+          mandatory, and this screen is a single scrolling column that already
+          reflows correctly on any size/orientation, so we simply don't fight it.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.RecorderX"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Does the actual capture/encode/mux work. Runs independently of
+             MainActivity's lifecycle so recording survives the user leaving
+             the app; stopWithTask keeps it from lingering after a task-kill swipe. -->
+        <service
+            android:name=".service.RecordingService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection|microphone"
+            android:stopWithTask="true" />
+
+    </application>
+
+</manifest>

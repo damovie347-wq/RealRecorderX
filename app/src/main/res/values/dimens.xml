@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="screen_padding">20dp</dimen>
+    <dimen name="section_spacing_top">30dp</dimen>
+    <dimen name="slider_block_spacing">24dp</dimen>
+    <dimen name="slider_touch_height">48dp</dimen>
+    <dimen name="slider_track_height">10dp</dimen>
+    <dimen name="slider_thumb_radius">14dp</dimen>
+    <dimen name="corner_radius_pill">28dp</dimen>
+    <dimen name="corner_radius_box">14dp</dimen>
+    <dimen name="cta_height">58dp</dimen>
+</resources>

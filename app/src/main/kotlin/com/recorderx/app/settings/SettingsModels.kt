@@ -1,0 +1,138 @@
+package com.recorderx.app.settings
+
+/**
+ * Every enum below carries its own short display [label] so sliders can be
+ * built data-driven (see ui/SegmentedSliderView + MainActivity) instead of
+ * hand-writing a near-identical XML block per setting. Labels are short,
+ * technical tokens (H.264, 4K, VBR...) rather than prose, which is why they
+ * live here as data instead of in strings.xml -- see build notes in
+ * ARCHITECTURE.md if you want to localize them anyway.
+ */
+
+/** User's codec *ceiling*: "try up to this, cascade down if unsupported."
+ * AV1 == "full auto cascade" (AV1 -> HEVC -> AVC), matching the spec's
+ * default priority order. See codec/CodecSelector.kt for the fallback logic. */
+enum class VideoCodecOption(val label: String, val mimeType: String) {
+    H264("H.264", "video/avc"),
+    H265("H.265", "video/hevc"),
+    AV1("AV1", "video/av01")
+}
+
+enum class OrientationOption(val label: String) {
+    AUTO("AUTO"),
+    PORTRAIT("PORT"),
+    LANDSCAPE("LAND")
+}
+
+/** Actual pixel targets are resolved at record time against the device's real
+ * panel size (see util/DeviceTier.kt#panelResolution) -- these are targets,
+ * not guarantees, since the encoder may need to round to an aligned size. */
+enum class ResolutionOption(val label: String, val longEdge: Int) {
+    NATIVE("NATIVE", 0), // 0 == "use the panel's real resolution, unscaled"
+    UHD_4K("4K", 3840),
+    QHD_2K("2K", 2560),
+    FHD("FHD", 1920),
+    HD("HD", 1280),
+    SD_480("480", 854)
+}
+
+enum class FrameRateOption(val label: String, val fps: Int) {
+    FPS_24("24", 24),
+    FPS_30("30", 30),
+    FPS_60("60", 60),
+    FPS_90("90", 90),
+    FPS_120("120", 120)
+}
+
+/** The "core" bitrate ladder shown by default. Advanced Mode (toggle in the
+ * UI) additionally unlocks [ADV_60M]..[ADV_100_PLUS]. AUTO is the default
+ * selection and defers to BitrateAdvisor rather than a fixed number. */
+enum class BitrateOption(val label: String, val bps: Int) {
+    AUTO("AUTO", -1),
+    BR_2M("2M", 2_000_000),
+    BR_4M("4M", 4_000_000),
+    BR_8M("8M", 8_000_000),
+    BR_12M("12M", 12_000_000),
+    BR_20M("20M", 20_000_000),
+    BR_40M("40M", 40_000_000),
+    ADV_60M("60M", 60_000_000),
+    ADV_80M("80M", 80_000_000),
+    ADV_100_PLUS("100M+", 100_000_000)
+}
+
+enum class BitrateMode(val label: String) {
+    VBR("VBR"),
+    CBR("CBR")
+}
+
+enum class AudioSourceOption(val label: String, val wantsSystem: Boolean, val wantsMic: Boolean) {
+    OFF("OFF", wantsSystem = false, wantsMic = false),
+    MIC("MIC", wantsSystem = false, wantsMic = true),
+    SYS("SYS", wantsSystem = true, wantsMic = false),
+    SYS_MIC("SYS+MIC", wantsSystem = true, wantsMic = true)
+}
+
+enum class AudioQualityOption(val label: String, val aacBitrate: Int, val sampleRate: Int) {
+    LOW("LOW", 96_000, 44_100),
+    MID("MID", 160_000, 48_000),
+    MAX("MAX", 256_000, 48_000)
+}
+
+enum class AudioChannelMode(val label: String, val channelCount: Int) {
+    AUTO("AUTO", -1), // resolved at record time from what the hardware actually offers
+    MONO("MONO", 1),
+    STEREO("STEREO", 2)
+}
+
+enum class MicGainMode(val label: String, val linearGain: Float) {
+    AUTO("AUTO", -1f), // handled by AutomaticGainControl instead of a fixed multiplier
+    LOW("LOW", 0.6f),
+    NORMAL("NORMAL", 1.0f),
+    HIGH("HIGH", 1.6f)
+}
+
+enum class VoicePriority(val label: String, val duckFloor: Float) {
+    OFF("OFF", 1.0f),
+    LOW("LOW", 0.55f),
+    MEDIUM("MEDIUM", 0.35f),
+    HIGH("HIGH", 0.15f)
+}
+
+enum class AudioMixMode(val label: String) {
+    SYSTEM_ONLY("SYSTEM ONLY"),
+    MIC_ONLY("MIC ONLY"),
+    SYSTEM_MIC("SYSTEM + MIC")
+}
+
+enum class AudioMonitoringMode(val label: String) {
+    OFF("OFF"),
+    HEADPHONES_ONLY("HEADPHONES ONLY")
+}
+
+/**
+ * The full, persisted shape of a user's recording configuration. Immutable +
+ * copy() so the UI layer and RecordingService both work with plain snapshots
+ * rather than a shared mutable object.
+ */
+data class RecordingSettings(
+    val videoCodec: VideoCodecOption = VideoCodecOption.AV1,
+    val orientation: OrientationOption = OrientationOption.AUTO,
+    val resolution: ResolutionOption = ResolutionOption.NATIVE,
+    val frameRate: FrameRateOption = FrameRateOption.FPS_30,
+    val bitrateOption: BitrateOption = BitrateOption.AUTO,
+    val bitrateMode: BitrateMode = BitrateMode.VBR,
+    val advancedBitrateUnlocked: Boolean = false,
+
+    val audioSource: AudioSourceOption = AudioSourceOption.SYS_MIC,
+    val audioQuality: AudioQualityOption = AudioQualityOption.MID,
+    val audioChannel: AudioChannelMode = AudioChannelMode.AUTO,
+    val micGain: MicGainMode = MicGainMode.AUTO,
+    val voicePriority: VoicePriority = VoicePriority.OFF,
+    val systemLevelPercent: Int = 100, // 0..200
+    val micLevelPercent: Int = 100,    // 0..200
+    val audioMix: AudioMixMode = AudioMixMode.SYSTEM_MIC,
+    val audioMonitoring: AudioMonitoringMode = AudioMonitoringMode.OFF,
+
+    val floatingBubbleEnabled: Boolean = true,
+    val outputTemplate: String = "RecorderX_{timestamp}"
+)
