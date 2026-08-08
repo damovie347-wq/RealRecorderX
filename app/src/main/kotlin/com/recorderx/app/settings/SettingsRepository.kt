@@ -21,7 +21,14 @@ class SettingsRepository(context: Context) {
             // No saved value yet (first launch) -- resolve the *smart* default
             // (H.264 on Android 8/9 or a low-tier device, AV1's full fallback
             // cascade elsewhere) instead of a single hardcoded constant.
-            videoCodec = savedEnumOrNull(KEY_CODEC)
+            // Explicit <VideoCodecOption> type argument: leaving this to be
+            // inferred purely from the enclosing elvis + named-argument
+            // expected-type context trips a K2 inference bug in AGP 9.3's
+            // built-in Kotlin compiler with self-bounded generics
+            // (`<reified T : Enum<T>>`) -- it fixes T to a nullable type and
+            // then fails the Enum<T> bound check. Naming the type argument
+            // sidesteps the inference path entirely.
+            videoCodec = savedEnumOrNull<VideoCodecOption>(KEY_CODEC)
                 ?: CodecSelector.resolveDefaultPreference(appContext),
             orientation = enumOf(KEY_ORIENTATION, defaults.orientation),
             resolution = enumOf(KEY_RESOLUTION, defaults.resolution),
