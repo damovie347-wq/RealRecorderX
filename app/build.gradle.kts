@@ -117,7 +117,13 @@ dependencies {
     // whole settings screen is plain LinearLayouts built in Kotlin (see
     // MainActivity#buildRootView), so there's no ConstraintLayout dependency
     // to carry either.
-    implementation("androidx.core:core-ktx:1.19.0")
+    // Pinned to 1.17.0 (not the latest 1.19.0): androidx.core 1.18.0+ bakes a
+    // minCompileSdk of 36.1/37 into its AAR metadata, which fails
+    // checkDebugAarMetadata against our compileSdk 36 (see note above --
+    // platforms;android-37 isn't installable in CI yet). 1.17.0 is the last
+    // stable release whose minCompileSdk is exactly 36. Bump this together
+    // with compileSdk once android-37 is actually available.
+    implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
 }
