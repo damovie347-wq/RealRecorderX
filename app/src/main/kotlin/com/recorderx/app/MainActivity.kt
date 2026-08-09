@@ -18,9 +18,9 @@ import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.appcompat.widget.SwitchCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.google.android.material.materialswitch.MaterialSwitch
 import com.recorderx.app.bitrate.BitrateAdvisor
 import com.recorderx.app.codec.CodecSelector
 import com.recorderx.app.service.RecordingService
@@ -271,7 +271,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
-        row.addView(MaterialSwitch(this).apply {
+        row.addView(SwitchCompat(this).apply {
             isChecked = settings.floatingBubbleEnabled
             thumbTintList = ContextCompat.getColorStateList(this@MainActivity, R.color.accent_yellow)
             setOnCheckedChangeListener { _, checked -> updateSettings { copy(floatingBubbleEnabled = checked) } }
@@ -390,7 +390,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_secondary))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
-        advancedRow.addView(MaterialSwitch(this).apply {
+        advancedRow.addView(SwitchCompat(this).apply {
             isChecked = advancedBitrate
             thumbTintList = ContextCompat.getColorStateList(this@MainActivity, R.color.accent_yellow)
             setOnCheckedChangeListener { _, checked ->

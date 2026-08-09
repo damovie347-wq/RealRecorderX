@@ -139,6 +139,63 @@ and are called out in code comments where relevant:
 - No automated tests are included yet (a natural next addition once you're
   iterating on a physical device).
 
+## Troubleshooting log
+
+Three real issues surfaced going from "compiles" to "actually runs," kept
+here so a regression is easy to recognize instead of re-diagnosing from
+scratch:
+
+1. **CI: `sdkmanager` fails with `Failed to find package 'platforms;android-37'`.**
+   Android 17 (API 37) has shipped, but Google hadn't published the
+   `platforms;android-37` package to the `sdkmanager` repository yet at the
+   time this was hit. Fix: `compileSdk`/`targetSdk` pinned to **36** in
+   `app/build.gradle.kts` and `ANDROID_PLATFORM` pinned to `android-36` in
+   the workflow, with comments at both spots marking them to bump back to 37
+   once the platform package is actually published. `androidx.core` is
+   correspondingly pinned to **1.17.0** — 1.18.0+ bakes a `minCompileSdk` of
+   36.1/37 into its AAR metadata, which fails `checkDebugAarMetadata` against
+   a 36 `compileSdk`.
+
+2. **Build: a Kotlin K2 inference error on `savedEnumOrNull(KEY_CODEC) ?:
+   CodecSelector.resolveDefaultPreference(...)`.** This is a real, currently
+   open Kotlin compiler issue ([KT-86728](https://youtrack.jetbrains.com/issue/KT-86728),
+   "reified type inference: expected type not propagated into inline call
+   inside lambda with elvis operator") that AGP 9.3's bundled Kotlin 2.2.10
+   hits. Fix: name the type argument explicitly —
+   `savedEnumOrNull<VideoCodecOption>(KEY_CODEC)` — which sidesteps the
+   inference path entirely. If you add another
+   `inline fun <reified T> ... ?: fallback` pattern elsewhere, give it the
+   same explicit type argument up front rather than waiting to hit this again.
+
+3. **Runtime: app crashes immediately on launch, before any UI shows.**
+   `MainActivity` used `com.google.android.material.materialswitch.MaterialSwitch`
+   for the Floating Bubble Controls / Advanced Bitrate toggles.
+   **`MaterialSwitch` requires a `Theme.Material3.*` parent theme** — it
+   resolves `?attr/materialSwitchStyle` and Material-3-only color attributes
+   (like `colorSurfaceContainerHighest`) that simply don't exist on
+   `Theme.MaterialComponents` (the M2-family theme this app actually uses),
+   so constructing it throws the moment `MainActivity.onCreate()` builds the
+   settings screen — before the user can interact with anything at all. Fix:
+   both toggles now use `androidx.appcompat.widget.SwitchCompat` instead,
+   which works with any AppCompat/MaterialComponents theme and picks up the
+   same yellow tint via `thumbTintList` (and, as a bonus, automatically
+   through the theme's `colorControlActivated`). `MaterialButton` and
+   `MaterialAlertDialogBuilder` do **not** have this requirement and were
+   left as-is — only `MaterialSwitch` is Material-3-exclusive among the
+   widgets this app uses.
+
+If you ever hit a crash-on-launch again and the cause isn't obvious from
+this list, the fastest path is a real stack trace:
+
+```bash
+adb logcat -c
+adb shell am start -n com.recorderx.app.debug/com.recorderx.app.MainActivity
+adb logcat *:E | grep -A 30 "FATAL EXCEPTION"
+```
+
+That output pinpoints the exact class/line, which turns "the app crashes"
+into a five-minute fix instead of a guessing game.
+
 ## License
 
 No license file is included — add one (MIT/Apache-2.0 are common choices for
