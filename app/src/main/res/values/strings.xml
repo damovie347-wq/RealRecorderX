@@ -6,6 +6,8 @@
     <string name="saved_in_prefix">Saved in:</string>
     <string name="nav_open_last">OPEN LAST RECORDING</string>
     <string name="nav_guide">GUIDE</string>
+    <string name="nav_theme">THEME</string>
+    <string name="theme_dialog_title">Appearance</string>
 
     <!-- Section headers -->
     <string name="section_video">VIDEO SUBSYSTEM</string>
@@ -42,6 +44,7 @@
     <string name="stop_recording">STOP</string>
     <string name="pause_recording">PAUSE</string>
     <string name="resume_recording">RESUME</string>
+    <string name="minimize_controls">Minimize</string>
     <string name="recording_elapsed">%1$s</string>
 
     <!-- Notification -->
@@ -55,6 +58,11 @@
     <string name="permission_rationale_overlay">RecorderX needs the \"draw over other apps\" permission so the recording controls can stay off the recording itself.</string>
     <string name="toast_mic_denied">Microphone permission denied — recording system audio only.</string>
     <string name="toast_no_hardware_encoder">No hardware video encoder matched these settings; falling back to the most compatible software encoder. Expect higher CPU use.</string>
+    <string name="toast_codec_fallback">%1$s isn\'t supported on this device — recording with %2$s instead.</string>
+    <string name="toast_recording_summary">Recording: %1$s</string>
+    <string name="toast_no_audio_captured">No audio was captured — check that microphone permission is granted, and that the app/game you\'re recording allows its audio to be captured.</string>
+    <string name="toast_system_audio_unavailable">System audio unavailable this session (the app you\'re recording may not allow audio capture) — recording microphone only.</string>
+    <string name="toast_mic_unavailable">Microphone unavailable this session — recording system audio only.</string>
     <string name="toast_no_last_recording">No recordings yet.</string>
     <string name="toast_recording_saved">Saved to Movies/RecorderX</string>
     <string name="toast_storage_permission_needed">Storage permission is needed to save recordings on this Android version.</string>
@@ -63,4 +71,9 @@
     <string name="guide_title">Quick guide</string>
     <string name="guide_body">1) Pick your video and audio settings below — Bitrate updates automatically as you change Resolution/FPS/Codec.\n2) Tap Start Recording, then grant screen-capture and (if you enabled a mic source) microphone permission.\n3) Use the small floating bubble to pause, resume, or stop — it never appears in the recording itself.\n4) Files save to Movies/RecorderX and are named from your Output Template.</string>
     <string name="guide_close">GOT IT</string>
+
+    <!-- Quick Settings tile -->
+    <string name="tile_label_idle">Record Screen</string>
+    <string name="tile_label_recording">Recording…</string>
+    <string name="tile_label_paused">Paused</string>
 </resources>

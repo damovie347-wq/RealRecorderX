@@ -2,12 +2,21 @@ package com.recorderx.app.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import com.recorderx.app.codec.CodecSelector
 
 /**
  * Plain SharedPreferences, not androidx.datastore: DataStore pulls in protobuf
  * or an extra Preferences artifact for a job that ~20 primitive key/value pairs
  * handle just fine. One more example of "don't add a dependency you don't need."
+ *
+ * Deliberately NOT using `inline fun <reified T : Enum<T>>` helpers here, even
+ * though that's the more compact way to write this. AGP 9.3's built-in Kotlin
+ * compiler has a real, confirmed inference bug (KT-86728) with exactly that
+ * pattern in this exact spot, and after tracking down a settings-not-honored
+ * bug that traced back to this file, every field below uses a plain,
+ * boring, per-type `valueOf()` call instead. No generics, no inference, no
+ * ambiguity -- see README.md's troubleshooting log for the full story.
  */
 class SettingsRepository(context: Context) {
 
@@ -17,37 +26,46 @@ class SettingsRepository(context: Context) {
 
     fun load(): RecordingSettings {
         val defaults = RecordingSettings()
-        return RecordingSettings(
-            // No saved value yet (first launch) -- resolve the *smart* default
-            // (H.264 on Android 8/9 or a low-tier device, AV1's full fallback
-            // cascade elsewhere) instead of a single hardcoded constant.
-            // Explicit <VideoCodecOption> type argument: leaving this to be
-            // inferred purely from the enclosing elvis + named-argument
-            // expected-type context trips a K2 inference bug in AGP 9.3's
-            // built-in Kotlin compiler with self-bounded generics
-            // (`<reified T : Enum<T>>`) -- it fixes T to a nullable type and
-            // then fails the Enum<T> bound check. Naming the type argument
-            // sidesteps the inference path entirely.
-            videoCodec = savedEnumOrNull<VideoCodecOption>(KEY_CODEC)
-                ?: CodecSelector.resolveDefaultPreference(appContext),
-            orientation = enumOf(KEY_ORIENTATION, defaults.orientation),
-            resolution = enumOf(KEY_RESOLUTION, defaults.resolution),
-            frameRate = enumOf(KEY_FPS, defaults.frameRate),
-            bitrateOption = enumOf(KEY_BITRATE, defaults.bitrateOption),
-            bitrateMode = enumOf(KEY_BITRATE_MODE, defaults.bitrateMode),
+
+        // No saved codec yet (first launch) -- resolve the device-aware smart
+        // default (H.264 on Android 8/9 or a low-tier device, AV1's full
+        // fallback cascade elsewhere) instead of a single hardcoded constant.
+        val savedCodecRaw = prefs.getString(KEY_CODEC, null)
+        val videoCodec = if (savedCodecRaw == null) {
+            CodecSelector.resolveDefaultPreference(appContext)
+        } else {
+            parseVideoCodec(savedCodecRaw) ?: CodecSelector.resolveDefaultPreference(appContext)
+        }
+
+        val settings = RecordingSettings(
+            videoCodec = videoCodec,
+            orientation = parseOrientation(prefs.getString(KEY_ORIENTATION, null)) ?: defaults.orientation,
+            resolution = parseResolution(prefs.getString(KEY_RESOLUTION, null)) ?: defaults.resolution,
+            frameRate = parseFrameRate(prefs.getString(KEY_FPS, null)) ?: defaults.frameRate,
+            bitrateOption = parseBitrateOption(prefs.getString(KEY_BITRATE, null)) ?: defaults.bitrateOption,
+            bitrateMode = parseBitrateMode(prefs.getString(KEY_BITRATE_MODE, null)) ?: defaults.bitrateMode,
             advancedBitrateUnlocked = prefs.getBoolean(KEY_ADV_BITRATE, defaults.advancedBitrateUnlocked),
-            audioSource = enumOf(KEY_AUDIO_SOURCE, defaults.audioSource),
-            audioQuality = enumOf(KEY_AUDIO_QUALITY, defaults.audioQuality),
-            audioChannel = enumOf(KEY_AUDIO_CHANNEL, defaults.audioChannel),
-            micGain = enumOf(KEY_MIC_GAIN, defaults.micGain),
-            voicePriority = enumOf(KEY_VOICE_PRIORITY, defaults.voicePriority),
+            audioSource = parseAudioSource(prefs.getString(KEY_AUDIO_SOURCE, null)) ?: defaults.audioSource,
+            audioQuality = parseAudioQuality(prefs.getString(KEY_AUDIO_QUALITY, null)) ?: defaults.audioQuality,
+            audioChannel = parseAudioChannel(prefs.getString(KEY_AUDIO_CHANNEL, null)) ?: defaults.audioChannel,
+            micGain = parseMicGain(prefs.getString(KEY_MIC_GAIN, null)) ?: defaults.micGain,
+            voicePriority = parseVoicePriority(prefs.getString(KEY_VOICE_PRIORITY, null)) ?: defaults.voicePriority,
             systemLevelPercent = prefs.getInt(KEY_SYSTEM_LEVEL, defaults.systemLevelPercent),
             micLevelPercent = prefs.getInt(KEY_MIC_LEVEL, defaults.micLevelPercent),
-            audioMix = enumOf(KEY_AUDIO_MIX, defaults.audioMix),
-            audioMonitoring = enumOf(KEY_AUDIO_MONITORING, defaults.audioMonitoring),
+            audioMix = parseAudioMix(prefs.getString(KEY_AUDIO_MIX, null)) ?: defaults.audioMix,
+            audioMonitoring = parseAudioMonitoring(prefs.getString(KEY_AUDIO_MONITORING, null)) ?: defaults.audioMonitoring,
             floatingBubbleEnabled = prefs.getBoolean(KEY_BUBBLE, defaults.floatingBubbleEnabled),
             outputTemplate = prefs.getString(KEY_TEMPLATE, defaults.outputTemplate) ?: defaults.outputTemplate
         )
+
+        Log.i(
+            TAG,
+            "load(): codec=${settings.videoCodec} (raw='$savedCodecRaw') " +
+                "resolution=${settings.resolution} fps=${settings.frameRate.fps} " +
+                "bitrate=${settings.bitrateOption}/${settings.bitrateMode} " +
+                "audioSource=${settings.audioSource}"
+        )
+        return settings
     }
 
     fun save(settings: RecordingSettings) {
@@ -71,6 +89,7 @@ class SettingsRepository(context: Context) {
             .putBoolean(KEY_BUBBLE, settings.floatingBubbleEnabled)
             .putString(KEY_TEMPLATE, settings.outputTemplate)
             .apply()
+        Log.i(TAG, "save(): codec=${settings.videoCodec} resolution=${settings.resolution} fps=${settings.frameRate.fps}")
     }
 
     fun setLastRecordingUri(uriString: String?) {
@@ -79,28 +98,49 @@ class SettingsRepository(context: Context) {
 
     fun getLastRecordingUri(): String? = prefs.getString(KEY_LAST_RECORDING, null)
 
-    private inline fun <reified T : Enum<T>> enumOf(key: String, default: T): T {
-        val raw = prefs.getString(key, null) ?: return default
-        return try {
-            enumValueOf<T>(raw)
-        } catch (e: IllegalArgumentException) {
-            default
-        }
-    }
+    // -- Explicit, non-generic parsers. Verbose on purpose; see class kdoc. --
 
-    /** Returns null (rather than a fallback) when nothing has been saved yet,
-     * so the caller can tell "first launch" apart from "user picked this
-     * value" -- only used for videoCodec's device-aware smart default. */
-    private inline fun <reified T : Enum<T>> savedEnumOrNull(key: String): T? {
-        val raw = prefs.getString(key, null) ?: return null
-        return try {
-            enumValueOf<T>(raw)
-        } catch (e: IllegalArgumentException) {
-            null
-        }
-    }
+    private fun parseVideoCodec(raw: String?): VideoCodecOption? =
+        try { raw?.let { VideoCodecOption.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseOrientation(raw: String?): OrientationOption? =
+        try { raw?.let { OrientationOption.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseResolution(raw: String?): ResolutionOption? =
+        try { raw?.let { ResolutionOption.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseFrameRate(raw: String?): FrameRateOption? =
+        try { raw?.let { FrameRateOption.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseBitrateOption(raw: String?): BitrateOption? =
+        try { raw?.let { BitrateOption.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseBitrateMode(raw: String?): BitrateMode? =
+        try { raw?.let { BitrateMode.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseAudioSource(raw: String?): AudioSourceOption? =
+        try { raw?.let { AudioSourceOption.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseAudioQuality(raw: String?): AudioQualityOption? =
+        try { raw?.let { AudioQualityOption.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseAudioChannel(raw: String?): AudioChannelMode? =
+        try { raw?.let { AudioChannelMode.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseMicGain(raw: String?): MicGainMode? =
+        try { raw?.let { MicGainMode.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseVoicePriority(raw: String?): VoicePriority? =
+        try { raw?.let { VoicePriority.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseAudioMix(raw: String?): AudioMixMode? =
+        try { raw?.let { AudioMixMode.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseAudioMonitoring(raw: String?): AudioMonitoringMode? =
+        try { raw?.let { AudioMonitoringMode.valueOf(it) } } catch (e: IllegalArgumentException) { null }
 
     companion object {
+        private const val TAG = "SettingsRepository"
         private const val PREFS_NAME = "recorderx_settings"
         private const val KEY_CODEC = "video_codec"
         private const val KEY_ORIENTATION = "orientation"

@@ -31,6 +31,10 @@
         android:name="android.hardware.microphone"
         android:required="false" />
 
+    <!-- Normal permission the platform grants to any app declaring a
+         TileService — required for the Quick Settings tile shortcut. -->
+    <uses-permission android:name="android.permission.BIND_QUICK_SETTINGS_TILE" />
+
     <application
         android:name=".App"
         android:allowBackup="false"
@@ -43,7 +47,7 @@
 
         <!--
           No android:screenOrientation and no resizeableActivity="false" here on
-          purpose: Android 17 (targetSdk 37) makes large-screen adaptivity
+          purpose: recent Android versions make large-screen adaptivity
           mandatory, and this screen is a single scrolling column that already
           reflows correctly on any size/orientation, so we simply don't fight it.
         -->
@@ -66,6 +70,21 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection|microphone"
             android:stopWithTask="true" />
+
+        <!-- Quick Settings shade shortcut. Not pinned automatically — like any
+             third-party tile, the user adds it once via the shade's "Edit
+             tiles" pencil icon, which is a platform-level, unavoidable step
+             for every app's tile, not something specific to this one. -->
+        <service
+            android:name=".service.RecordingTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_notification"
+            android:label="@string/tile_label_idle"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
     </application>
 

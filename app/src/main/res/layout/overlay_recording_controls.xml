@@ -1,50 +1,90 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/overlayRoot"
     android:layout_width="wrap_content"
-    android:layout_height="wrap_content"
-    android:orientation="horizontal"
-    android:gravity="center_vertical"
-    android:background="@drawable/bg_overlay_pill"
-    android:paddingStart="14dp"
-    android:paddingEnd="6dp"
-    android:paddingTop="8dp"
-    android:paddingBottom="8dp"
-    android:elevation="6dp">
+    android:layout_height="wrap_content">
 
-    <View
-        android:layout_width="10dp"
-        android:layout_height="10dp"
-        android:background="@drawable/dot_recording" />
+    <!-- Default state: a small, unobtrusive draggable dot. Tap to expand;
+         drag from anywhere on it to reposition. Kept intentionally tiny so
+         it "takes up almost no room" and so that even a worst-case FLAG_SECURE
+         render (see RecordingOverlayController kdoc) is a small dot, not a
+         large rectangle. -->
+    <FrameLayout
+        android:id="@+id/collapsedDot"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="@drawable/bg_overlay_dot"
+        android:elevation="6dp"
+        android:visibility="visible">
 
-    <TextView
-        android:id="@+id/txtElapsed"
+        <View
+            android:layout_width="10dp"
+            android:layout_height="10dp"
+            android:layout_gravity="center"
+            android:background="@drawable/dot_recording" />
+    </FrameLayout>
+
+    <!-- Expanded state: full control row, shown only while the user is
+         actively interacting with it. -->
+    <LinearLayout
+        android:id="@+id/expandedRow"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
-        android:layout_marginEnd="10dp"
-        android:fontFamily="sans-serif-medium"
-        android:textColor="#FFFFFF"
-        android:textSize="13sp"
-        android:text="00:00" />
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@drawable/bg_overlay_pill"
+        android:paddingStart="14dp"
+        android:paddingEnd="6dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:elevation="6dp"
+        android:visibility="gone">
 
-    <ImageButton
-        android:id="@+id/btnPauseResume"
-        android:layout_width="36dp"
-        android:layout_height="36dp"
-        android:background="@android:color/transparent"
-        android:src="@drawable/ic_pause"
-        android:contentDescription="@string/pause_recording"
-        android:padding="6dp" />
+        <View
+            android:layout_width="10dp"
+            android:layout_height="10dp"
+            android:background="@drawable/dot_recording" />
 
-    <ImageButton
-        android:id="@+id/btnStop"
-        android:layout_width="36dp"
-        android:layout_height="36dp"
-        android:layout_marginStart="2dp"
-        android:background="@android:color/transparent"
-        android:src="@drawable/ic_stop"
-        android:contentDescription="@string/stop_recording"
-        android:padding="6dp" />
+        <TextView
+            android:id="@+id/txtElapsed"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_marginEnd="10dp"
+            android:fontFamily="sans-serif-medium"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:text="00:00" />
 
-</LinearLayout>
+        <ImageButton
+            android:id="@+id/btnPauseResume"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="@android:color/transparent"
+            android:src="@drawable/ic_pause"
+            android:contentDescription="@string/pause_recording"
+            android:padding="6dp" />
+
+        <ImageButton
+            android:id="@+id/btnStop"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="2dp"
+            android:background="@android:color/transparent"
+            android:src="@drawable/ic_stop"
+            android:contentDescription="@string/stop_recording"
+            android:padding="6dp" />
+
+        <ImageButton
+            android:id="@+id/btnCollapse"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginStart="2dp"
+            android:background="@android:color/transparent"
+            android:src="@drawable/ic_collapse"
+            android:contentDescription="@string/minimize_controls"
+            android:padding="6dp"
+            android:alpha="0.7" />
+
+    </LinearLayout>
+</FrameLayout>

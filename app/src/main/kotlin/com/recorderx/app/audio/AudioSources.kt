@@ -5,12 +5,13 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
-import android.media.projection.MediaProjection
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
+import android.media.projection.MediaProjection
 import android.os.Build
+import android.util.Log
 import androidx.annotation.RequiresApi
 import com.recorderx.app.settings.MicGainMode
 
@@ -21,7 +22,8 @@ import com.recorderx.app.settings.MicGainMode
  * [MediaProjection] token the screen capture uses; the platform itself
  * enforces per-app opt-out (apps that mark their audio ALLOW_CAPTURE_BY_NONE,
  * or that target < Android 10 without opting in, are silently excluded --
- * RecorderX doesn't try to work around that, by design).
+ * RecorderX doesn't try to work around that, by design. If a specific app's
+ * audio never shows up, check what API level *that app* targets first).
  */
 @RequiresApi(Build.VERSION_CODES.Q)
 class SystemAudioSource(
@@ -50,7 +52,10 @@ class SystemAudioSource(
             .build()
 
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
-        if (minBuf <= 0) return false
+        if (minBuf <= 0) {
+            Log.w(TAG, "start(): getMinBufferSize returned $minBuf for rate=$sampleRate mask=$channelMask -- aborting")
+            return false
+        }
 
         val record = try {
             AudioRecord.Builder()
@@ -59,15 +64,19 @@ class SystemAudioSource(
                 .setBufferSizeInBytes(minBuf * 4)
                 .build()
         } catch (e: UnsupportedOperationException) {
+            Log.w(TAG, "start(): AudioRecord.Builder().build() threw", e)
             null
         }
 
         audioRecord = record
         if (record?.state != AudioRecord.STATE_INITIALIZED) {
+            Log.w(TAG, "start(): AudioRecord state=${record?.state} (not STATE_INITIALIZED) -- system audio capture unavailable this session")
             release()
             return false
         }
         record.startRecording()
+        val recording = record.recordingState == AudioRecord.RECORDSTATE_RECORDING
+        Log.i(TAG, "start(): system audio capture started, recordingState=${record.recordingState} (recording=$recording)")
         return true
     }
 
@@ -85,6 +94,10 @@ class SystemAudioSource(
         audioRecord?.release()
         audioRecord = null
     }
+
+    companion object {
+        private const val TAG = "SystemAudioSource"
+    }
 }
 
 /**
@@ -93,6 +106,20 @@ class SystemAudioSource(
  * layered on when the device offers them. This is what keeps speaker output
  * from being picked back up by the mic and re-mixed a second time on top of
  * the direct system-audio tap above.
+ *
+ * Uses [MediaRecorder.AudioSource.MIC] rather than VOICE_COMMUNICATION. An
+ * earlier version tried VOICE_COMMUNICATION first for its built-in
+ * echo-cancellation reputation, but that source is designed around two-way
+ * call audio and expects [android.media.AudioManager]'s mode to be set to
+ * MODE_IN_COMMUNICATION to route correctly -- this app never touches
+ * AudioManager's mode (doing so has broader side effects on the device's
+ * audio routing while recording, which a screen recorder shouldn't be
+ * causing). Without that mode set, VOICE_COMMUNICATION can report
+ * STATE_INITIALIZED successfully while actually capturing silence or
+ * heavily-attenuated audio on some OEM audio HALs -- a failure mode that
+ * previous initialization-only health checks couldn't detect. Plain MIC has
+ * no such coupling; AcousticEchoCanceler/NoiseSuppressor below are attached
+ * explicitly regardless of source and don't depend on call-mode state.
  */
 class MicAudioSource(
     private val sampleRate: Int,
@@ -107,21 +134,21 @@ class MicAudioSource(
     @SuppressLint("MissingPermission") // RECORD_AUDIO is checked by the caller before this is ever constructed
     fun start(): Boolean {
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
-        if (minBuf <= 0) return false
+        if (minBuf <= 0) {
+            Log.w(TAG, "start(): getMinBufferSize returned $minBuf for rate=$sampleRate mask=$channelMask -- aborting")
+            return false
+        }
 
-        // VOICE_COMMUNICATION routes through the platform's voice processing
-        // chain (built for exactly the echo/noise problem this app has to
-        // solve), which is a better starting point for "clean, professional
-        // mix" than the plain MIC source. Not every device exposes a usable
-        // AudioRecord for it, so we fall back to MIC if it fails to initialize.
-        var record = tryCreate(MediaRecorder.AudioSource.VOICE_COMMUNICATION, minBuf)
+        var record = tryCreate(MediaRecorder.AudioSource.MIC, minBuf)
         if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
+            Log.w(TAG, "start(): AudioSource.MIC failed to initialize (state=${record?.state}), trying CAMCORDER as fallback")
             record?.release()
-            record = tryCreate(MediaRecorder.AudioSource.MIC, minBuf)
+            record = tryCreate(MediaRecorder.AudioSource.CAMCORDER, minBuf)
         }
 
         audioRecord = record
         if (record?.state != AudioRecord.STATE_INITIALIZED) {
+            Log.w(TAG, "start(): no mic AudioSource could initialize -- mic capture unavailable this session")
             release()
             return false
         }
@@ -138,6 +165,12 @@ class MicAudioSource(
         }
 
         record.startRecording()
+        val recording = record.recordingState == AudioRecord.RECORDSTATE_RECORDING
+        Log.i(
+            TAG,
+            "start(): mic capture started, recordingState=${record.recordingState} (recording=$recording), " +
+                "aec=${echoCanceler != null} ns=${noiseSuppressor != null} agc=${automaticGainControl != null}"
+        )
         return true
     }
 
@@ -145,6 +178,7 @@ class MicAudioSource(
     private fun tryCreate(source: Int, minBuf: Int): AudioRecord? = try {
         AudioRecord(source, sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT, minBuf * 4)
     } catch (e: Exception) {
+        Log.w(TAG, "tryCreate(source=$source) threw", e)
         null
     }
 
@@ -165,5 +199,9 @@ class MicAudioSource(
         }
         audioRecord?.release()
         audioRecord = null
+    }
+
+    companion object {
+        private const val TAG = "MicAudioSource"
     }
 }

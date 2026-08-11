@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-      Light-only theme by design: the reference UI is a single, deliberate light
-      aesthetic, not a light/dark pair. DayNight is a reasonable v2 addition
-      (see ARCHITECTURE.md) but isn't guessed at here.
+      Base theme. Colors are referenced by name (@color/background etc.) and
+      resolve differently depending on night mode — see values-night/colors.xml
+      for the dark palette and values-night/themes.xml for the one structural
+      override (windowLightStatusBar) that can't be expressed as a color lookup.
+      AppCompatDelegate's night mode is set in App#onCreate from the user's
+      saved Light/Dark/AMOLED choice (settings/ThemePreference).
     -->
     <style name="Theme.RecorderX" parent="Theme.MaterialComponents.NoActionBar">
         <item name="colorPrimary">@color/accent_yellow</item>

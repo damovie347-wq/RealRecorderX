@@ -73,6 +73,7 @@ class RecordingService : Service() {
     private var isPaused = false
     private var recordingStartElapsedRealtime = 0L
     private var pausedAccumulatedMs = 0L
+    private var audioFrameOffset = 0L
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -192,6 +193,7 @@ class RecordingService : Service() {
                 Toast.makeText(this, R.string.toast_no_hardware_encoder, Toast.LENGTH_LONG).show()
             }
         }
+        announceCodecResult(currentSettings.videoCodec, codecChoice)
 
         val bitrateBps = if (currentSettings.bitrateOption == BitrateOption.AUTO) {
             BitrateAdvisor.suggestBitrateBps(codecChoice.width, codecChoice.height, currentSettings.frameRate.fps, codecChoice.mimeType)
@@ -224,6 +226,62 @@ class RecordingService : Service() {
         return true
     }
 
+    /** Compares what the user picked against what CodecSelector actually
+     * resolved (post hardware-availability cascade) and says so plainly when
+     * a fallback happened, instead of silently substituting a different
+     * codec with no indication anything changed. */
+    private fun announceCodecResult(preference: com.recorderx.app.settings.VideoCodecOption, choice: com.recorderx.app.codec.CodecChoice) {
+        val resolvedLabel = mimeToLabel(choice.mimeType)
+        val fellBack = mimeToPreference(choice.mimeType) != preference
+        Log.i(TAG, "announceCodecResult(): preference=$preference resolved=$resolvedLabel " +
+            "size=${choice.width}x${choice.height} fps=${currentSettings.frameRate.fps} fellBack=$fellBack")
+        mainHandler.post {
+            if (fellBack) {
+                Toast.makeText(
+                    this,
+                    getString(R.string.toast_codec_fallback, preference.label, resolvedLabel),
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            val summary = "$resolvedLabel · ${choice.width}x${choice.height} · ${currentSettings.frameRate.fps}fps"
+            Toast.makeText(this, getString(R.string.toast_recording_summary, summary), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun mimeToLabel(mime: String): String = when (mime) {
+        android.media.MediaFormat.MIMETYPE_VIDEO_AV1 -> "AV1"
+        android.media.MediaFormat.MIMETYPE_VIDEO_HEVC -> "H.265"
+        else -> "H.264"
+    }
+
+    private fun mimeToPreference(mime: String): com.recorderx.app.settings.VideoCodecOption = when (mime) {
+        android.media.MediaFormat.MIMETYPE_VIDEO_AV1 -> com.recorderx.app.settings.VideoCodecOption.AV1
+        android.media.MediaFormat.MIMETYPE_VIDEO_HEVC -> com.recorderx.app.settings.VideoCodecOption.H265
+        else -> com.recorderx.app.settings.VideoCodecOption.H264
+    }
+
+    /** Checks what actually got captured against what the user asked for and
+     * says so -- silence with no explanation is exactly the "granted every
+     * permission but got no audio, with no idea why" problem this replaces. */
+    private fun announceAudioResult(mixer: AudioMixEngine) {
+        val wantedSystem = currentSettings.audioSource.wantsSystem
+        val wantedMic = currentSettings.audioSource.wantsMic
+        val gotSystem = mixer.hasSystemAudio
+        val gotMic = mixer.hasMicAudio
+        Log.i(TAG, "announceAudioResult(): wantedSystem=$wantedSystem gotSystem=$gotSystem wantedMic=$wantedMic gotMic=$gotMic")
+
+        val message = when {
+            !wantedSystem && !wantedMic -> null
+            !gotSystem && !gotMic -> getString(R.string.toast_no_audio_captured)
+            wantedSystem && !gotSystem -> getString(R.string.toast_system_audio_unavailable)
+            wantedMic && !gotMic -> getString(R.string.toast_mic_unavailable)
+            else -> null
+        }
+        if (message != null) {
+            mainHandler.post { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
+        }
+    }
+
     private fun startAudioPipeline(muxer: MuxerController) {
         val wantsSystemAudio = currentSettings.audioSource.wantsSystem && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
         val channelCount = AudioMixEngine.resolveChannelCount(currentSettings.audioChannel, wantsSystemAudio)
@@ -233,7 +291,14 @@ class RecordingService : Service() {
         encoder.startDraining()
         audioEncoder = encoder
 
-        val mixer = AudioMixEngine(mediaProjection, currentSettings, encoder, resolvedSampleRate) { t -> handleFatalError(t) }
+        val mixer = AudioMixEngine(
+            context = this,
+            mediaProjection = mediaProjection,
+            settings = currentSettings,
+            audioEncoder = encoder,
+            sampleRate = resolvedSampleRate,
+            onError = { t -> handleFatalError(t) }
+        )
         if (mixer.start()) {
             audioMixEngine = mixer
         } else {
@@ -242,6 +307,7 @@ class RecordingService : Service() {
             // so the muxer's expected track count is satisfied either way.
             encoder.requestStop()
         }
+        announceAudioResult(mixer)
     }
 
     // ---- Pause / resume ------------------------------------------------
@@ -265,6 +331,7 @@ class RecordingService : Service() {
         pausedAccumulatedMs = SystemClock.elapsedRealtime() - recordingStartElapsedRealtime + pausedAccumulatedMs
         captureController?.stop()
         captureController = null
+        audioFrameOffset = audioMixEngine?.totalFramesWritten ?: audioFrameOffset
         audioMixEngine?.stop()
         audioMixEngine = null
 
@@ -278,6 +345,7 @@ class RecordingService : Service() {
         isPaused = false
         recordingStartElapsedRealtime = SystemClock.elapsedRealtime()
 
+        videoEncoder?.requestPauseRebase()
         val surface = encoderInputSurface
         val projection = mediaProjection
         if (surface != null && projection != null) {
@@ -290,7 +358,15 @@ class RecordingService : Service() {
 
         val encoder = audioEncoder
         if (currentSettings.audioSource != AudioSourceOption.OFF && encoder != null) {
-            val mixer = AudioMixEngine(mediaProjection, currentSettings, encoder, resolvedSampleRate) { t -> handleFatalError(t) }
+            val mixer = AudioMixEngine(
+                context = this,
+                mediaProjection = mediaProjection,
+                settings = currentSettings,
+                audioEncoder = encoder,
+                sampleRate = resolvedSampleRate,
+                startFrameOffset = audioFrameOffset,
+                onError = { t -> handleFatalError(t) }
+            )
             if (mixer.start()) audioMixEngine = mixer
         }
 

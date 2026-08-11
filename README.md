@@ -84,7 +84,20 @@ gradle wrapper --gradle-version 9.5.0 --distribution-type all
   echo cancellation / noise suppression on the mic path.
 - **Controls:** the floating pause/stop bubble is a second, `FLAG_SECURE`
   window, never part of any view MediaProjection could capture — see
-  `overlay/RecordingOverlayController.kt`.
+  `overlay/RecordingOverlayController.kt`. It starts collapsed to a small
+  40dp draggable dot and only expands to the full control row on tap, so it
+  stays out of the way during recording and, in the worst case, only a small
+  shape (not a large rectangle) can ever appear on OEM skins where
+  `FLAG_SECURE` renders as solid black instead of being fully excluded.
+- **Quick Settings tile:** `service/RecordingTileService.kt` adds a shade
+  shortcut (add it once via the shade's "Edit tiles" pencil icon, like any
+  third-party tile) — stops a running recording with no Activity needed, or
+  opens the app when idle (starting needs the system consent dialog, which
+  only an Activity can show).
+- **Appearance:** Light / Dark / AMOLED, switchable from the THEME button in
+  the top bar (`MainActivity#showThemeDialog`) — Dark uses standard DayNight
+  resource qualifiers (`values-night/`), AMOLED layers true black on top of
+  Dark's palette for the main surfaces and system bars.
 - **UI:** one programmatically-built settings screen (no Compose, no XML
   layout for the main screen) using a single custom `Canvas`-drawn slider
   view for every control, matching the reference screenshot's pill sliders.
@@ -141,8 +154,8 @@ and are called out in code comments where relevant:
 
 ## Troubleshooting log
 
-Three real issues surfaced going from "compiles" to "actually runs," kept
-here so a regression is easy to recognize instead of re-diagnosing from
+Real issues surfaced going from "compiles" to "actually runs correctly,"
+kept here so a regression is easy to recognize instead of re-diagnosing from
 scratch:
 
 1. **CI: `sdkmanager` fails with `Failed to find package 'platforms;android-37'`.**
@@ -192,6 +205,71 @@ adb logcat -c
 adb shell am start -n com.recorderx.app.debug/com.recorderx.app.MainActivity
 adb logcat *:E | grep -A 30 "FATAL EXCEPTION"
 ```
+
+4. **Recorded video's duration shows garbage (e.g. "222:03:25") in players/
+   gallery apps.** Surface-input frames arrive with whatever timestamp
+   SurfaceFlinger stamped on them -- nanoseconds *since boot*, not since the
+   recording started. Left unrebased, the video track's PTS values were
+   enormous (hours), which is exactly what corrupts the duration players
+   compute. Fix: `VideoEncoderPipeline` now rebases every frame's PTS against
+   the session's first real frame, and separately absorbs each pause/resume
+   gap (`requestPauseRebase()`) so the timeline stays continuous instead of
+   jumping forward by however long a pause actually lasted in wall-clock time.
+
+5. **Pausing a recording silently kills the audio track for the rest of the
+   session.** `AudioMixEngine`'s mix loop called `audioEncoder.requestStop()`
+   in a `finally` block that ran on *every* `stop()` -- including a pause,
+   not just the final stop -- permanently EOS'ing the long-lived
+   `AudioEncoderPipeline` that's meant to survive across a resume. Fix:
+   that call was removed from the loop entirely; `RecordingService.handleStop()`
+   already signals the real, final EOS explicitly exactly once. A matching
+   `startFrameOffset` was added so a resumed `AudioMixEngine` continues the
+   PTS timeline instead of restarting audio timestamps at 0 (which would
+   have overlapped the pre-pause audio).
+
+6. **Selected Resolution/FPS/Codec don't match the actual output file.**
+   Three separate causes, all fixed together:
+   - *Resolution:* `ResolutionResolver` used to silently substitute the
+     panel's native size whenever a requested tier (e.g. "4K") exceeded it.
+     Technically defensible (upscaling adds no real detail) but meant the
+     picker had no effect with no indication why. It now always honors the
+     exact selection -- `MediaProjection.createVirtualDisplay` can target any
+     size regardless of the physical panel -- and exposes `isUpscaling()` for
+     an informational UI note instead of an override.
+   - *FPS:* `MediaFormat.KEY_FRAME_RATE` is only a bitrate-calculation hint on
+     Surface input, not an enforced cap -- SurfaceFlinger keeps delivering
+     frames at the display's native refresh rate regardless of it. The actual
+     mechanism, `KEY_MAX_FPS_TO_ENCODER` ("max-fps-to-encoder"), takes a
+     **float**, not an int; an earlier version stored it as an int, which is
+     silently ignored (`Bundle` lookups are type-specific), so the cap never
+     applied. Now stored as a float and applied at `configure()` time, not
+     just reactively under thermal stress.
+   - *Codec:* traced back to the same `inline fun <reified T>` settings-
+     persistence pattern that hit KT-86728 (#2 above) -- the saved codec
+     preference wasn't reliably read back, so sessions kept falling through
+     to the AV1-cascade smart default (→ HEVC on most devices) regardless of
+     what was selected. Fixed by the same rewrite. `RecordingService` now
+     also toasts the *actually resolved* codec/resolution/fps at the start of
+     every recording, and explicitly says so when a fallback happens (e.g.
+     "AV1 isn't supported on this device — recording with HEVC instead")
+     instead of substituting silently.
+
+7. **No audio captured at all, despite every permission being granted.**
+   `MicAudioSource` tried `MediaRecorder.AudioSource.VOICE_COMMUNICATION`
+   first, reasoning it'd get better built-in echo cancellation. That source
+   is designed around two-way call audio and expects `AudioManager`'s mode to
+   be set to `MODE_IN_COMMUNICATION` to route correctly -- something this app
+   never did (deliberately: changing system-wide audio routing while
+   recording is a bigger side effect than a screen recorder should cause). On
+   some OEM audio HALs this source reports `STATE_INITIALIZED` successfully
+   while actually capturing silence, which no initialization-only health
+   check could catch. Fixed by using plain `AudioSource.MIC` instead, with
+   `AcousticEchoCanceler`/`NoiseSuppressor` attached explicitly (they don't
+   have this coupling). `AudioMixEngine` also now logs every step of both
+   capture paths and exposes `hasSystemAudio`/`hasMicAudio` so
+   `RecordingService` can toast a clear explanation whenever what was
+   captured doesn't match what was requested, rather than a silently quiet
+   recording.
 
 That output pinpoints the exact class/line, which turns "the app crashes"
 into a five-minute fix instead of a guessing game.

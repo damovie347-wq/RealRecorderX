@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base surface -->
+    <color name="background">#121212</color>
+    <color name="surface">#1E1E1C</color>
+    <color name="divider">#2A2A28</color>
+
+    <!-- Accent stays consistent as the one brand color across all three modes -->
+    <color name="accent_yellow">#F5B301</color>
+    <color name="accent_yellow_pressed">#DA9F00</color>
+    <color name="accent_yellow_faint">#3D3319</color>
+
+    <!-- Text -->
+    <color name="text_primary">#F2F0EA</color>
+    <color name="text_secondary">#9C9A94</color>
+    <color name="text_on_accent">#17140D</color>
+
+    <!-- Slider — thumb flips to a light color here since it would otherwise
+         sit low-contrast against a dark, not light, unfilled track -->
+    <color name="track_background">#2E2E2C</color>
+    <color name="thumb_color">#F2F0EA</color>
+    <color name="tick_on_fill">#59000000</color>
+    <color name="tick_on_track">#40FFFFFF</color>
+
+    <!-- Status -->
+    <color name="danger_red">#F2555A</color>
+    <color name="success_green">#3DB772</color>
+</resources>

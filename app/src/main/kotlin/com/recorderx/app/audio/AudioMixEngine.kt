@@ -1,9 +1,14 @@
 package com.recorderx.app.audio
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.projection.MediaProjection
 import android.os.Build
 import android.os.Process
+import android.util.Log
+import androidx.core.content.ContextCompat
 import com.recorderx.app.encoder.AudioEncoderPipeline
 import com.recorderx.app.settings.AudioChannelMode
 import com.recorderx.app.settings.MicGainMode
@@ -19,10 +24,17 @@ import kotlin.math.sign
  * the resolved output channel count, and feeds the result to [audioEncoder].
  */
 class AudioMixEngine(
+    private val context: Context,
     private val mediaProjection: MediaProjection?,
     private val settings: RecordingSettings,
     private val audioEncoder: AudioEncoderPipeline,
     private val sampleRate: Int,
+    /** Audio frames already fed to the encoder in earlier (pre-pause) segments
+     * of this same recording session. Without this, each new AudioMixEngine
+     * instance created on resume would start computing PTS from 0 again,
+     * overlapping the timestamps of audio already written before the pause --
+     * see RecordingService#resumeInternal. */
+    private val startFrameOffset: Long = 0L,
     private val onError: (Throwable) -> Unit
 ) {
     private var systemSource: SystemAudioSource? = null
@@ -32,44 +44,76 @@ class AudioMixEngine(
     private var mixThread: Thread? = null
     @Volatile private var running = false
 
+    /** Total frames fed to the encoder so far (including [startFrameOffset]),
+     * read by RecordingService when pausing so the *next* AudioMixEngine
+     * instance can continue the same PTS timeline. */
+    @Volatile var totalFramesWritten: Long = startFrameOffset
+        private set
+
     /** Resolved once at [start] time from the settings + what hardware is
      * actually available, per "Auto doesn't fake stereo when the mic can't
      * offer it, and preserves real stereo for system audio when it can." */
     var effectiveChannelCount: Int = 1
         private set
 
+    /** What actually ended up capturing, *after* [start] -- read this rather
+     * than assuming the requested [RecordingSettings.audioSource] was
+     * achieved. RecordingService surfaces a toast when this disagrees with
+     * what the user asked for, instead of silently producing a quiet track. */
+    var hasSystemAudio: Boolean = false
+        private set
+    var hasMicAudio: Boolean = false
+        private set
+
     fun start(): Boolean {
+        val hasRecordAudioPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
         val wantsSystem = settings.audioSource.wantsSystem &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
             mediaProjection != null
         val wantsMic = settings.audioSource.wantsMic
 
+        Log.i(
+            TAG,
+            "start(): audioSource=${settings.audioSource} wantsSystem=$wantsSystem wantsMic=$wantsMic " +
+                "RECORD_AUDIO granted=$hasRecordAudioPermission sdk=${Build.VERSION.SDK_INT}"
+        )
+
+        if ((wantsSystem || wantsMic) && !hasRecordAudioPermission) {
+            Log.w(TAG, "start(): RECORD_AUDIO not granted -- no audio will be captured this session")
+        }
+
         effectiveChannelCount = resolveChannelCount(settings.audioChannel, systemStereoAvailable = wantsSystem)
 
-        if (wantsSystem) {
+        if (wantsSystem && hasRecordAudioPermission) {
             val src = SystemAudioSource(mediaProjection!!, sampleRate, AudioFormat.CHANNEL_IN_STEREO)
             if (src.start()) {
                 systemSource = src
+                hasSystemAudio = true
             } else {
-                // System-audio tap failed to init (rare, but device-dependent) --
-                // keep going with whatever else was requested instead of failing
-                // the whole recording over a non-essential audio path.
+                // System-audio tap failed to init -- often because the specific
+                // foreground app opts out of (or predates) playback capture, not
+                // a bug in this app. Keep going with whatever else was requested
+                // instead of failing the whole recording over one audio path.
                 src.release()
             }
         }
-        if (wantsMic) {
+        if (wantsMic && hasRecordAudioPermission) {
             val src = MicAudioSource(sampleRate, AudioFormat.CHANNEL_IN_MONO, settings.micGain)
             if (src.start()) {
                 micSource = src
+                hasMicAudio = true
             } else {
                 src.release()
             }
         }
 
+        Log.i(TAG, "start(): result hasSystemAudio=$hasSystemAudio hasMicAudio=$hasMicAudio channelCount=$effectiveChannelCount")
+
         if (systemSource == null && micSource == null) {
-            // Nothing to record (either Audio Source == OFF, or every capture
-            // path we tried failed to initialize). Caller treats this as "no
-            // audio track," not as a fatal recording error.
+            // Nothing to record (either Audio Source == OFF, permission missing,
+            // or every capture path we tried failed to initialize). Caller
+            // treats this as "no audio track," not as a fatal recording error.
             return false
         }
 
@@ -100,7 +144,7 @@ class AudioMixEngine(
         val micGainMultiplier = if (settings.micGain == MicGainMode.AUTO) 1f else settings.micGain.linearGain
         val micLevel = micLevelBase * micGainMultiplier
 
-        var framesWritten = 0L
+        var framesWritten = startFrameOffset
         val chunkDurationMs = framesPerChunk * 1000f / sampleRate
 
         try {
@@ -119,12 +163,16 @@ class AudioMixEngine(
                 val presentationTimeUs = framesWritten * 1_000_000L / sampleRate
                 audioEncoder.feedPcm(outBuf, outBuf.size, presentationTimeUs)
                 framesWritten += framesPerChunk
+                totalFramesWritten = framesWritten
             }
         } catch (t: Throwable) {
             onError(t)
-        } finally {
-            audioEncoder.requestStop()
         }
+        // No audioEncoder.requestStop() here: this loop also exits on every
+        // *pause* (via stop()), not just the final stop, and the encoder is a
+        // long-lived object meant to keep accepting input across a resume.
+        // RecordingService.handleStop() signals the encoder's real EOS
+        // explicitly, exactly once, when the recording actually ends.
     }
 
     private fun mixToMono(
@@ -178,6 +226,7 @@ class AudioMixEngine(
     }
 
     companion object {
+        private const val TAG = "AudioMixEngine"
         private const val SOFT_CLIP_THRESHOLD = 26000f
         private const val SOFT_CLIP_KNEE = 6000f
 

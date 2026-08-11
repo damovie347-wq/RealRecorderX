@@ -3,9 +3,9 @@ package com.recorderx.app.encoder
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.util.Log
 import android.view.Surface
 import com.recorderx.app.codec.CodecChoice
 import com.recorderx.app.settings.BitrateMode
@@ -33,6 +33,26 @@ class VideoEncoderPipeline(
     // recent output rate vs. the configured target.
     private val bytesSinceLastSample = AtomicLong(0)
 
+    // Surface-input frames arrive with whatever timestamp SurfaceFlinger
+    // stamped on them -- typically nanoseconds since *boot*, not since this
+    // recording started. Left unrebased, the muxer ends up with a video
+    // track whose PTS values are enormous (hours), which is exactly what
+    // produced garbage durations like "222:03:25" in players/galleries.
+    // Rebasing every sample against the first real frame's timestamp fixes
+    // this; audio's PTS is already computed relative to 0 on the input side
+    // (see AudioMixEngine), so only video needs this correction.
+    private var sessionBaseUs: Long = -1L
+
+    // Pause/resume releases and later recreates the VirtualDisplay against the
+    // same input Surface (see RecordingService#pauseInternal), but the *raw*
+    // timestamps SurfaceFlinger stamps on frames keep advancing in real time
+    // regardless -- without correction, the first frame after a resume would
+    // jump forward by however long the pause actually lasted. pauseOffsetUs
+    // absorbs that gap; requestPauseRebase() arms it for the next real frame.
+    private var pauseOffsetUs: Long = 0L
+    private var lastEmittedPtsUs: Long = -1L
+    @Volatile private var awaitingResumeRebase = false
+
     fun configure(choice: CodecChoice, bitrate: Int, fps: Int, bitrateMode: BitrateMode): Surface {
         val format = MediaFormat.createVideoFormat(choice.mimeType, choice.width, choice.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -45,12 +65,27 @@ class VideoEncoderPipeline(
                 MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
             }
             setInteger(MediaFormat.KEY_BITRATE_MODE, modeConst)
+            // Cap the *actual* input rate up front, not just reactively under
+            // thermal stress -- see tryLimitInputFrameRate's kdoc for why this
+            // is needed at all (KEY_FRAME_RATE alone is a bitrate-calculation
+            // hint, not an enforced cap, on surface input).
+            try {
+                setFloat(KEY_MAX_FPS_TO_ENCODER, fps.toFloat())
+            } catch (e: Exception) {
+                // Some codecs reject unknown keys at configure time rather
+                // than ignoring them -- setParameters() after start() below
+                // is the reliable fallback.
+            }
         }
+
+        Log.i(TAG, "configure(): codec=${choice.codecName} mime=${choice.mimeType} " +
+            "size=${choice.width}x${choice.height} fps=$fps bitrate=$bitrate mode=$bitrateMode hw=${choice.isHardware}")
 
         codec = MediaCodec.createByCodecName(choice.codecName)
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         inputSurface = codec.createInputSurface()
         codec.start()
+        tryLimitInputFrameRate(fps)
         return inputSurface
     }
 
@@ -58,6 +93,15 @@ class VideoEncoderPipeline(
         val t = Thread({ drainLoop() }, "RecorderX-VideoEncoder")
         drainThread = t
         t.start()
+    }
+
+    /** Call once, right before recreating the VirtualDisplay on resume (see
+     * RecordingService#resumeInternal). Arms the rebase so the next real
+     * frame's raw timestamp becomes the new reference point, continuing the
+     * output timeline from [lastEmittedPtsUs] instead of jumping forward by
+     * however long the pause actually lasted in wall-clock time. */
+    fun requestPauseRebase() {
+        awaitingResumeRebase = true
     }
 
     private fun drainLoop() {
@@ -82,6 +126,29 @@ class VideoEncoderPipeline(
                             bufferInfo.size = 0
                         }
                         if (bufferInfo.size != 0) {
+                            if (sessionBaseUs < 0) {
+                                sessionBaseUs = bufferInfo.presentationTimeUs
+                                Log.i(TAG, "First video frame PTS=$sessionBaseUs us (boot-relative) -- rebasing track to start at 0")
+                            }
+                            val rawRelativeUs = bufferInfo.presentationTimeUs - sessionBaseUs
+
+                            if (awaitingResumeRebase) {
+                                // This is the first frame after a resume: make its
+                                // rebased PTS pick up right after the last one we
+                                // emitted (plus a tiny nudge to stay strictly
+                                // increasing), absorbing the pause's real-world
+                                // duration into pauseOffsetUs from here on.
+                                pauseOffsetUs = rawRelativeUs - lastEmittedPtsUs - RESUME_FRAME_NUDGE_US
+                                awaitingResumeRebase = false
+                            }
+
+                            var rebasedUs = rawRelativeUs - pauseOffsetUs
+                            if (rebasedUs <= lastEmittedPtsUs) {
+                                rebasedUs = lastEmittedPtsUs + RESUME_FRAME_NUDGE_US
+                            }
+                            bufferInfo.presentationTimeUs = rebasedUs
+                            lastEmittedPtsUs = rebasedUs
+
                             val encodedData = codec.getOutputBuffer(outIndex)
                             if (encodedData != null && trackIndex >= 0) {
                                 if (!muxerController.isStarted()) muxerController.awaitStarted()
@@ -122,18 +189,28 @@ class VideoEncoderPipeline(
         }
     }
 
-    /** Best-effort thermal relief valve for severe thermal states: asks the
-     * encoder to internally drop input frames above [maxFps]. This key
-     * (API 31+, "max-fps-to-encoder") isn't honored by every encoder, so it's
-     * used as a bonus on top of -- never instead of -- bitrate throttling. */
+    /**
+     * Asks the encoder to internally drop input frames above [maxFps]. This is
+     * the actual enforcement mechanism for the user's FPS choice on a
+     * Surface-input encoder -- [MediaFormat.KEY_FRAME_RATE] alone is only a
+     * bitrate-calculation hint; SurfaceFlinger keeps delivering frames at the
+     * display's native refresh rate regardless of it, which is why FPS
+     * selection previously had no visible effect on the output.
+     *
+     * The float type here matters: [MediaFormat.KEY_MAX_FPS_TO_ENCODER]'s
+     * documented value type is float, not int -- passing an int silently
+     * does nothing (Bundle lookups are type-specific), which is exactly the
+     * bug this replaces. Called once at configure() time and again,
+     * defensively, by ThermalBitrateGovernor under thermal stress.
+     */
     fun tryLimitInputFrameRate(maxFps: Int) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
         try {
             val params = Bundle()
-            params.putInt("max-fps-to-encoder", maxFps)
+            params.putFloat(KEY_MAX_FPS_TO_ENCODER, maxFps.toFloat())
             codec.setParameters(params)
+            Log.i(TAG, "tryLimitInputFrameRate($maxFps) applied")
         } catch (e: Throwable) {
-            // Silently ignored by design -- see kdoc above.
+            Log.w(TAG, "tryLimitInputFrameRate($maxFps) not honored by this encoder", e)
         }
     }
 
@@ -161,6 +238,19 @@ class VideoEncoderPipeline(
     }
 
     companion object {
+        private const val TAG = "VideoEncoderPipeline"
         private const val TIMEOUT_US = 10_000L
+
+        // Tiny (1ms, inaudible/invisible) forced gap used to guarantee
+        // strictly-increasing PTS values across a pause/resume boundary --
+        // MediaMuxer requires non-decreasing timestamps per track.
+        private const val RESUME_FRAME_NUDGE_US = 1_000L
+
+        // MediaFormat.KEY_MAX_FPS_TO_ENCODER as a raw string: using the typed
+        // SDK constant would require gating this whole class behind an API
+        // check, but the *key* is just a string the platform either
+        // recognizes or safely ignores, so it's used directly and tried on
+        // every API level (26+) via try/catch rather than an SDK_INT gate.
+        private const val KEY_MAX_FPS_TO_ENCODER = "max-fps-to-encoder"
     }
 }

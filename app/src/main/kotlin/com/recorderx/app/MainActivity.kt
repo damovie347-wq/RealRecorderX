@@ -3,6 +3,7 @@ package com.recorderx.app
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Typeface
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -37,6 +38,8 @@ import com.recorderx.app.settings.OrientationOption
 import com.recorderx.app.settings.RecordingSettings
 import com.recorderx.app.settings.ResolutionOption
 import com.recorderx.app.settings.SettingsRepository
+import com.recorderx.app.settings.ThemeMode
+import com.recorderx.app.settings.ThemePreference
 import com.recorderx.app.settings.VideoCodecOption
 import com.recorderx.app.settings.VoicePriority
 import com.recorderx.app.ui.SegmentedSliderView
@@ -49,6 +52,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var settings: RecordingSettings
+    private lateinit var themePreference: ThemePreference
 
     private lateinit var settingsContainer: LinearLayout
     private lateinit var btnStartRecording: MaterialButton
@@ -89,6 +93,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         settingsRepository = SettingsRepository(this)
         settings = settingsRepository.load()
+        themePreference = ThemePreference(this)
         advancedBitrate = settings.advancedBitrateUnlocked
 
         setContentView(buildRootView())
@@ -112,6 +117,16 @@ class MainActivity : AppCompatActivity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(ContextCompat.getColor(this@MainActivity, R.color.background))
+        }
+
+        if (themePreference.load() == ThemeMode.AMOLED) {
+            // Dark mode's resource-driven palette already applied via
+            // AppCompatDelegate's night mode (see App#onCreate); AMOLED layers
+            // true black on top of it for the main surfaces and system bars,
+            // which is what actually saves power / looks right on an OLED panel.
+            root.setBackgroundColor(Color.BLACK)
+            window.statusBarColor = Color.BLACK
+            window.navigationBarColor = Color.BLACK
         }
 
         root.addView(buildTopBar())
@@ -160,6 +175,7 @@ class MainActivity : AppCompatActivity() {
 
         bar.addView(smallNavButton(getString(R.string.nav_open_last)) { openLastRecording() })
         bar.addView(smallNavButton(getString(R.string.nav_guide)) { showGuideDialog() })
+        bar.addView(smallNavButton(getString(R.string.nav_theme)) { showThemeDialog() })
 
         return bar
     }
@@ -618,6 +634,33 @@ class MainActivity : AppCompatActivity() {
             .setMessage(R.string.guide_body)
             .setPositiveButton(R.string.guide_close, null)
             .show()
+    }
+
+    private fun showThemeDialog() {
+        val modes = ThemeMode.values()
+        val labels = modes.map { it.label }.toTypedArray()
+        val currentIndex = modes.indexOf(themePreference.load()).coerceAtLeast(0)
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.theme_dialog_title)
+            .setSingleChoiceItems(labels, currentIndex) { dialog, which ->
+                applyThemeMode(modes[which])
+                dialog.dismiss()
+            }
+            .setNegativeButton(R.string.guide_close, null)
+            .show()
+    }
+
+    private fun applyThemeMode(mode: ThemeMode) {
+        if (themePreference.load() == mode) return
+        themePreference.save(mode)
+        androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(
+            if (mode == ThemeMode.LIGHT) {
+                androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO
+            } else {
+                androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES
+            }
+        )
+        recreate()
     }
 
     private fun toast(text: String) = android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_SHORT).show()

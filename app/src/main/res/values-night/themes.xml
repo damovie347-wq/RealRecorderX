@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.RecorderX" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/accent_yellow</item>
+        <item name="colorPrimaryDark">@color/accent_yellow_pressed</item>
+        <item name="colorAccent">@color/accent_yellow</item>
+        <item name="colorControlActivated">@color/accent_yellow</item>
+
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:statusBarColor">@color/background</item>
+        <!-- The one thing that can't be a color-name lookup: dark background
+             needs light status-bar icons, not dark ones. -->
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">@color/background</item>
+
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:fontFamily">sans-serif</item>
+
+        <item name="android:windowActivityTransitions">false</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="elevationOverlayEnabled">false</item>
+    </style>
+</resources>
