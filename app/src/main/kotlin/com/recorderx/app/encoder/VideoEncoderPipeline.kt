@@ -65,6 +65,22 @@ class VideoEncoderPipeline(
                 MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
             }
             setInteger(MediaFormat.KEY_BITRATE_MODE, modeConst)
+
+            // Without this, several vendor drivers silently configure() into
+            // their *lowest* profile/level (e.g. AVC Baseline) whenever the
+            // format doesn't ask for one explicitly -- which caps both the
+            // encoding tools available (no B-frames, no CABAC on Baseline)
+            // and, via the paired level, the maximum bitrate the stream is
+            // even allowed to reach, regardless of KEY_BIT_RATE above. This
+            // is the actual mechanism behind "resolution and bitrate are
+            // both set high, but it still doesn't look sharp." CodecSelector
+            // already resolved the highest (profile, level) *this* encoder
+            // actually advertises, so this can never request a combination
+            // the hardware didn't list; 0 means "codec reported nothing,
+            // leave its own default alone."
+            if (choice.profile != 0) setInteger(MediaFormat.KEY_PROFILE, choice.profile)
+            if (choice.level != 0) setInteger(MediaFormat.KEY_LEVEL, choice.level)
+
             // Cap the *actual* input rate up front, not just reactively under
             // thermal stress -- see tryLimitInputFrameRate's kdoc for why this
             // is needed at all (KEY_FRAME_RATE alone is a bitrate-calculation
@@ -76,10 +92,26 @@ class VideoEncoderPipeline(
                 // than ignoring them -- setParameters() after start() below
                 // is the reliable fallback.
             }
+
+            // Tells the encoder the throughput it actually needs to sustain,
+            // so it can pick a clock/power operating point sized for *that*
+            // instead of defaulting to a max-throughput point "just in case."
+            // Documented for high-speed capture (record fast, encode slow),
+            // but the mechanism is symmetric: any operating-rate hint lets
+            // the driver's power management plan around a known target
+            // instead of the worst case -- directly in service of "ısınmayı
+            // ve güç tüketimini azalt." Best-effort: some drivers reject
+            // unknown keys at configure() time rather than ignoring them.
+            try {
+                setFloat(MediaFormat.KEY_OPERATING_RATE, fps.toFloat())
+            } catch (e: Exception) {
+                // Not fatal -- purely a power-planning hint.
+            }
         }
 
         Log.i(TAG, "configure(): codec=${choice.codecName} mime=${choice.mimeType} " +
-            "size=${choice.width}x${choice.height} fps=$fps bitrate=$bitrate mode=$bitrateMode hw=${choice.isHardware}")
+            "size=${choice.width}x${choice.height} fps=$fps bitrate=$bitrate mode=$bitrateMode " +
+            "hw=${choice.isHardware} profile=${choice.profile} level=${choice.level}")
 
         codec = MediaCodec.createByCodecName(choice.codecName)
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)

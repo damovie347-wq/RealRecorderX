@@ -41,6 +41,13 @@ class AudioMixEngine(
     private var micSource: MicAudioSource? = null
     private val ducking = DuckingProcessor(settings.voicePriority)
 
+    // Second-stage defense against system audio bleeding back into the mic
+    // through the speaker, on top of MicAudioSource's platform AEC -- see
+    // ResidualBleedSuppressor's kdoc for why AEC alone often isn't enough
+    // for loud game/media content. Only ever engages when both sources are
+    // actually active (see mixLoop); a no-op the rest of the time.
+    private val bleedSuppressor = ResidualBleedSuppressor()
+
     private var mixThread: Thread? = null
     @Volatile private var running = false
 
@@ -138,6 +145,10 @@ class AudioMixEngine(
         val systemBuf = ShortArray(framesPerChunk * 2) // stereo interleaved
         val micBuf = ShortArray(framesPerChunk)
         val outBuf = ShortArray(framesPerChunk * effectiveChannelCount)
+        // Reused every chunk (never reallocated inside the loop) to keep the
+        // realtime mixer thread free of per-chunk GC churn -- same reasoning
+        // as systemBuf/micBuf/outBuf above.
+        val referenceMono = FloatArray(framesPerChunk)
 
         val systemLevel = settings.systemLevelPercent / 100f
         val micLevelBase = settings.micLevelPercent / 100f
@@ -155,9 +166,21 @@ class AudioMixEngine(
                 val isSpeaking = if (haveMic) ducking.updateSpeechState(micBuf, framesPerChunk) else false
                 val duckGain = ducking.nextSystemGain(isSpeaking, chunkDurationMs)
 
+                // Only meaningful -- and only possible -- when both sources
+                // are live this chunk: with no system-audio reference to
+                // compare against, there's nothing to detect bleed *from*.
+                val micSuppression = if (haveSystem && haveMic) {
+                    for (i in 0 until framesPerChunk) {
+                        referenceMono[i] = ((systemBuf[i * 2] + systemBuf[i * 2 + 1]) * 0.5f) / 32768f
+                    }
+                    bleedSuppressor.nextMicSuppression(referenceMono, micBuf, framesPerChunk, chunkDurationMs)
+                } else {
+                    1f
+                }
+
                 when (effectiveChannelCount) {
-                    1 -> mixToMono(systemBuf, haveSystem, micBuf, haveMic, outBuf, framesPerChunk, systemLevel * duckGain, micLevel)
-                    else -> mixToStereo(systemBuf, haveSystem, micBuf, haveMic, outBuf, framesPerChunk, systemLevel * duckGain, micLevel)
+                    1 -> mixToMono(systemBuf, haveSystem, micBuf, haveMic, outBuf, framesPerChunk, systemLevel * duckGain, micLevel * micSuppression)
+                    else -> mixToStereo(systemBuf, haveSystem, micBuf, haveMic, outBuf, framesPerChunk, systemLevel * duckGain, micLevel * micSuppression)
                 }
 
                 val presentationTimeUs = framesWritten * 1_000_000L / sampleRate

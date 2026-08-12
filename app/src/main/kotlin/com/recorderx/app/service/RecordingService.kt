@@ -75,6 +75,14 @@ class RecordingService : Service() {
     private var pausedAccumulatedMs = 0L
     private var audioFrameOffset = 0L
 
+    // Tracks whether the user explicitly hid the floating control bubble
+    // (RecordingOverlayController#hide via the overlay's own "eye" button) as
+    // opposed to it simply never having been enabled in settings -- drives
+    // whether buildNotification() offers a "Show controls" action, since the
+    // bubble obviously can't offer its own way back once it's detached from
+    // WindowManager. Reset whenever a fresh recording starts.
+    private var overlayHiddenByUser = false
+
     private val tickRunnable = object : Runnable {
         override fun run() {
             if (!isPaused) {
@@ -101,6 +109,7 @@ class RecordingService : Service() {
             ACTION_START -> handleStart(intent)
             ACTION_STOP -> handleStop()
             ACTION_TOGGLE_PAUSE -> handleTogglePause()
+            ACTION_SHOW_OVERLAY -> handleShowOverlay()
         }
         return START_NOT_STICKY
     }
@@ -163,12 +172,7 @@ class RecordingService : Service() {
         isPaused = false
         RecordingSessionState.update(RecordingSessionState.Phase.RECORDING, 0)
 
-        if (currentSettings.floatingBubbleEnabled) {
-            overlayController.show(
-                onTogglePauseResume = { handleTogglePause() },
-                onStop = { handleStop() }
-            )
-        }
+        showOverlayIfEnabled()
 
         mainHandler.post(tickRunnable)
     }
@@ -403,6 +407,7 @@ class RecordingService : Service() {
         }
 
         overlayController.hide()
+        overlayHiddenByUser = false
 
         try {
             mediaProjectionCallback?.let { mediaProjection?.unregisterCallback(it) }
@@ -452,6 +457,48 @@ class RecordingService : Service() {
         super.onDestroy()
     }
 
+    // ---- Overlay bubble --------------------------------------------------
+
+    /** Used both by handleStart() (first show) and handleShowOverlay() (user
+     * tapped "Show controls" in the notification after hiding it) -- the
+     * three callbacks are identical either way. No-ops if the setting is
+     * off, same as the original inline check in handleStart() did. */
+    private fun showOverlayIfEnabled() {
+        if (!currentSettings.floatingBubbleEnabled) return
+        overlayHiddenByUser = false
+        overlayController.show(
+            onTogglePauseResume = { handleTogglePause() },
+            onStop = { handleStop() },
+            onHide = { handleHideOverlay() }
+        )
+    }
+
+    /** Wired to the overlay's own "eye" button (see RecordingOverlayController).
+     * Fully detaches the window -- see that class's kdoc for why that's the
+     * only way to actually guarantee it's out of the next captured frame,
+     * unlike the old FLAG_SECURE approach. Surfaces a "Show controls" action
+     * on the persistent notification since the bubble can't offer its own
+     * way back once it's gone. */
+    private fun handleHideOverlay() {
+        overlayController.hide()
+        overlayHiddenByUser = true
+        refreshNotification()
+    }
+
+    /** Wired to the notification's "Show controls" action (see buildNotification). */
+    private fun handleShowOverlay() {
+        if (mediaProjection == null) return // stale tap after recording already ended
+        showOverlayIfEnabled()
+        refreshNotification()
+    }
+
+    private fun currentElapsedMs(): Long =
+        if (isPaused) pausedAccumulatedMs else SystemClock.elapsedRealtime() - recordingStartElapsedRealtime + pausedAccumulatedMs
+
+    private fun refreshNotification() {
+        updateNotification(formatElapsed(currentElapsedMs()), paused = isPaused)
+    }
+
     // ---- Notification ----------------------------------------------------
 
     private fun startForegroundNotification() {
@@ -484,7 +531,7 @@ class RecordingService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(getString(R.string.notification_recording_title))
             .setContentText(contentText)
@@ -493,7 +540,19 @@ class RecordingService : Service() {
             .setContentIntent(openIntent)
             .addAction(0, getString(R.string.stop_recording), stopIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+
+        // Only relevant if the bubble is actually enabled *and* the user hid
+        // it themselves (see handleHideOverlay) -- otherwise there's nothing
+        // to bring back, and this action would just be confusing clutter.
+        if (overlayHiddenByUser && currentSettings.floatingBubbleEnabled) {
+            val showOverlayIntent = PendingIntent.getService(
+                this, 1, buildShowOverlayIntent(this),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(0, getString(R.string.show_controls_action), showOverlayIntent)
+        }
+
+        return builder.build()
     }
 
     private fun createNotificationChannel() {
@@ -523,6 +582,7 @@ class RecordingService : Service() {
         const val ACTION_START = "com.recorderx.app.action.START"
         const val ACTION_STOP = "com.recorderx.app.action.STOP"
         const val ACTION_TOGGLE_PAUSE = "com.recorderx.app.action.TOGGLE_PAUSE"
+        const val ACTION_SHOW_OVERLAY = "com.recorderx.app.action.SHOW_OVERLAY"
 
         private const val EXTRA_RESULT_CODE = "extra_result_code"
         private const val EXTRA_RESULT_DATA = "extra_result_data"
@@ -551,5 +611,8 @@ class RecordingService : Service() {
 
         fun buildTogglePauseIntent(context: Context): Intent =
             Intent(context, RecordingService::class.java).setAction(ACTION_TOGGLE_PAUSE)
+
+        fun buildShowOverlayIntent(context: Context): Intent =
+            Intent(context, RecordingService::class.java).setAction(ACTION_SHOW_OVERLAY)
     }
 }

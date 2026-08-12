@@ -10,13 +10,21 @@ import com.recorderx.app.util.DeviceTier
 
 /** Result of a successful encoder search: everything VideoEncoderPipeline needs
  * to configure MediaCodec, plus the size actually granted (which may have been
- * nudged to satisfy the codec's alignment/range requirements). */
+ * nudged to satisfy the codec's alignment/range requirements).
+ *
+ * [profile]/[level] are 0 when the codec reported no profile/level info at all
+ * (rare, but seen on some very old OMX software paths) -- 0 means "don't set
+ * KEY_PROFILE/KEY_LEVEL, let the codec pick its own default," which is always
+ * a safe fallback. See [CodecSelector.pickProfileLevel] for why these are
+ * resolved here instead of left to the codec's own default. */
 data class CodecChoice(
     val codecName: String,
     val mimeType: String,
     val width: Int,
     val height: Int,
-    val isHardware: Boolean
+    val isHardware: Boolean,
+    val profile: Int = 0,
+    val level: Int = 0
 )
 
 object CodecSelector {
@@ -96,15 +104,58 @@ object CodecSelector {
                 continue
             }
 
+            val (profile, level) = pickProfileLevel(mime, capabilities.profileLevels)
+
             return CodecChoice(
                 codecName = info.name,
                 mimeType = mime,
                 width = adjW,
                 height = adjH,
-                isHardware = info.isLikelyHardware()
+                isHardware = info.isLikelyHardware(),
+                profile = profile,
+                level = level
             )
         }
         return null
+    }
+
+    /** The profile that unlocks each codec's full compression toolset (B-frames,
+     * CABAC entropy coding for AVC, etc.) rather than the stripped-down profile
+     * some vendor drivers silently default to when `configure()` doesn't request
+     * one explicitly. That silent default is a real, common cause of "bitrate
+     * and resolution are both set high, but it still doesn't look sharp" --
+     * a low profile caps both the encoding tools available *and*, via its
+     * paired level, the maximum bitrate the stream is even allowed to use,
+     * regardless of what KEY_BIT_RATE separately asks for. */
+    private fun preferredProfile(mime: String): Int = when (mime) {
+        MediaFormat.MIMETYPE_VIDEO_AVC -> MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
+        MediaFormat.MIMETYPE_VIDEO_HEVC -> MediaCodecInfo.CodecProfileLevel.HEVCProfileMain
+        MediaFormat.MIMETYPE_VIDEO_AV1 -> MediaCodecInfo.CodecProfileLevel.AV1ProfileMain8
+        else -> 0
+    }
+
+    /**
+     * Picks the highest-quality (profile, level) pair *this specific encoder*
+     * actually advertises in [profileLevels]: [preferredProfile] if the codec
+     * offers it at all, otherwise whatever profile it does offer (some low-end
+     * AVC encoders genuinely only implement Baseline -- forcing High on those
+     * would just make `configure()` throw, so this never demands a profile
+     * the hardware didn't list). Among entries at the chosen profile, picks
+     * the highest level, so the stream's bitrate ceiling is the codec's real
+     * maximum rather than a low level a driver might default to on its own.
+     *
+     * Returns 0 to 0 ("don't set KEY_PROFILE/KEY_LEVEL at all") if the codec
+     * reports no profile/level entries whatsoever -- letting the codec fall
+     * back to its own default is always safe, even if it's the conservative
+     * one this function otherwise tries to avoid.
+     */
+    private fun pickProfileLevel(mime: String, profileLevels: Array<MediaCodecInfo.CodecProfileLevel>?): Pair<Int, Int> {
+        val entries = profileLevels?.toList().orEmpty()
+        if (entries.isEmpty()) return 0 to 0
+        val wanted = preferredProfile(mime)
+        val candidates = entries.filter { it.profile == wanted }.ifEmpty { entries }
+        val best = candidates.maxByOrNull { it.level } ?: return 0 to 0
+        return best.profile to best.level
     }
 
     /** Rounds [w]x[h] to the codec's required width/height alignment and clamps

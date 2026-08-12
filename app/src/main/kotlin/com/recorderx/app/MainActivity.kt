@@ -59,6 +59,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var bitrateSuggestionLabel: TextView
     private lateinit var bitrateSlider: SegmentedSliderView
     private lateinit var bitrateLabelsRow: LinearLayout
+    private lateinit var resolutionUpscaleLabel: TextView
     private var advancedBitrate = false
 
     private val sessionListener: () -> Unit = { refreshStartButton() }
@@ -227,10 +228,7 @@ class MainActivity : AppCompatActivity() {
         addEnumSlider(container, getString(R.string.label_orientation), OrientationOption.values(), settings.orientation, { it.label }) {
             updateSettings { copy(orientation = it) }
         }
-        addEnumSlider(container, getString(R.string.label_resolution), ResolutionOption.values(), settings.resolution, { it.label }) {
-            updateSettings { copy(resolution = it) }
-            refreshBitrateSuggestion()
-        }
+        addResolutionBlock(container)
         addEnumSlider(container, getString(R.string.label_frame_rate), FrameRateOption.values(), settings.frameRate, { it.label }) {
             updateSettings { copy(frameRate = it) }
             refreshBitrateSuggestion()
@@ -371,6 +369,51 @@ class MainActivity : AppCompatActivity() {
                 })
             }
         }
+
+    private fun addResolutionBlock(container: LinearLayout) {
+        val options = ResolutionOption.values()
+        val startIndex = options.indexOf(settings.resolution).coerceAtLeast(0)
+        val (slider, _, _) = addSliderBlock(
+            container,
+            getString(R.string.label_resolution),
+            options.map { it.label },
+            startIndex
+        ) { idx ->
+            updateSettings { copy(resolution = options[idx]) }
+            refreshBitrateSuggestion()
+            refreshResolutionNote()
+        }
+
+        // Wired to ResolutionResolver.isUpscaling, previously computed but
+        // never actually shown anywhere -- picking "4K"/"2K" on a panel that
+        // doesn't natively hit that resolution silently upscales (still a
+        // fully valid, deliberate choice -- MediaProjection can target any
+        // size regardless of the physical panel), which reads exactly like
+        // "yüksek çözünürlük seçtim ama net görüntü alamıyorum" if the person
+        // has no way to know that's what's happening.
+        resolutionUpscaleLabel = TextView(this).apply {
+            textSize = 11.5f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_secondary))
+            setPadding(0, dp(8), 0, 0)
+        }
+        (slider.parent as LinearLayout).addView(resolutionUpscaleLabel)
+        refreshResolutionNote()
+    }
+
+    private fun refreshResolutionNote() {
+        if (!::resolutionUpscaleLabel.isInitialized) return
+        if (ResolutionResolver.isUpscaling(this, settings.resolution)) {
+            val panel = DeviceTier.panelResolutionPx(this)
+            resolutionUpscaleLabel.text = getString(
+                R.string.label_resolution_upscale_note,
+                "${panel.x}\u00D7${panel.y}",
+                settings.resolution.label
+            )
+            resolutionUpscaleLabel.visibility = View.VISIBLE
+        } else {
+            resolutionUpscaleLabel.visibility = View.GONE
+        }
+    }
 
     private fun addBitrateBlock(container: LinearLayout) {
         val options = currentBitrateOptions()

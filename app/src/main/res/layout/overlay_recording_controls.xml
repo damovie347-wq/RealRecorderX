@@ -5,21 +5,22 @@
     android:layout_height="wrap_content">
 
     <!-- Default state: a small, unobtrusive draggable dot. Tap to expand;
-         drag from anywhere on it to reposition. Kept intentionally tiny so
-         it "takes up almost no room" and so that even a worst-case FLAG_SECURE
-         render (see RecordingOverlayController kdoc) is a small dot, not a
-         large rectangle. -->
+         drag from anywhere on it to reposition. No FLAG_SECURE anymore (see
+         RecordingOverlayController kdoc) means this dot really can end up in
+         a recorded frame, so it is deliberately tiny and mostly transparent:
+         a soft ~18% scrim just large enough to grab, around a small dot,
+         rather than the old solid, dark 40dp circle. -->
     <FrameLayout
         android:id="@+id/collapsedDot"
-        android:layout_width="40dp"
-        android:layout_height="40dp"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
         android:background="@drawable/bg_overlay_dot"
         android:elevation="6dp"
         android:visibility="visible">
 
         <View
-            android:layout_width="10dp"
-            android:layout_height="10dp"
+            android:layout_width="14dp"
+            android:layout_height="14dp"
             android:layout_gravity="center"
             android:background="@drawable/dot_recording" />
     </FrameLayout>
@@ -74,6 +75,17 @@
             android:src="@drawable/ic_stop"
             android:contentDescription="@string/stop_recording"
             android:padding="6dp" />
+
+        <ImageButton
+            android:id="@+id/btnHide"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:layout_marginStart="2dp"
+            android:background="@android:color/transparent"
+            android:src="@drawable/ic_hide"
+            android:contentDescription="@string/hide_controls"
+            android:padding="6dp"
+            android:alpha="0.85" />
 
         <ImageButton
             android:id="@+id/btnCollapse"

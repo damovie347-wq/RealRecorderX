@@ -4,6 +4,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Process
+import java.nio.ByteOrder
 
 /**
  * Unlike the video path, audio has no Surface -- AudioMixEngine hands us
@@ -57,12 +58,14 @@ class AudioEncoderPipeline(
 
         val inputBuffer = codec.getInputBuffer(inputIndex) ?: return
         inputBuffer.clear()
+        // Bulk short-buffer put instead of a manual per-sample byte loop --
+        // identical output bytes (explicit little-endian, matching what the
+        // old manual loop wrote: low byte first), just without a Kotlin-level
+        // loop iteration + two put() calls per sample, 50 times/sec for the
+        // life of the recording. A small, free reduction in per-chunk CPU work.
+        inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+        inputBuffer.asShortBuffer().put(pcm, 0, sampleCount)
         val byteCount = sampleCount * 2
-        for (i in 0 until sampleCount) {
-            val s = pcm[i].toInt()
-            inputBuffer.put((s and 0xFF).toByte())
-            inputBuffer.put(((s shr 8) and 0xFF).toByte())
-        }
         codec.queueInputBuffer(inputIndex, 0, byteCount, presentationTimeUs, 0)
     }
 

@@ -136,10 +136,22 @@ step queries `MediaCodecList` for encoders that both declare the mime type
 same heuristic the wider Android ecosystem used before that API existed).
 Each candidate's width/height is rounded to the codec's required alignment
 and clamped into its supported range before being accepted, so `configure()`
-never throws on an odd panel size like 1080×2412. If literally nothing
-hardware-backed matches anywhere in the cascade, the absolute last resort is
-*any* AVC encoder, software included — recording still works, just hotter;
-`RecordingService` surfaces a toast when this happens.
+never throws on an odd panel size like 1080×2412. Each candidate also reports
+back the highest (profile, level) pair *it* actually advertises
+(`CodecSelector.pickProfileLevel`) preferring a profile that unlocks the
+codec's full toolset (AVC High / HEVC Main / AV1 Main8) — `VideoEncoderPipeline.configure()`
+sets these explicitly via `KEY_PROFILE`/`KEY_LEVEL` rather than leaving them
+to the driver's own default, since several vendor drivers silently
+`configure()` into their *lowest* profile/level when the format doesn't ask
+for one, capping both the encoding toolset available and, via the paired
+level, the maximum bitrate the stream is even allowed to reach regardless of
+`KEY_BIT_RATE`. This is the actual mechanism behind "bitrate ve çözünürlüğü
+yükselttim ama görüntü hâlâ net değil" independent of anything upscaling-related
+(§6) — the two are separate, stacking causes of the same symptom, not
+alternate explanations of it. If literally nothing hardware-backed matches
+anywhere in the cascade, the absolute last resort is *any* AVC encoder,
+software included — recording still works, just hotter; `RecordingService`
+surfaces a toast when this happens.
 
 The *default* selection itself is device-aware
 (`CodecSelector.resolveDefaultPreference`): Android 8/9 or a device this app
@@ -170,28 +182,55 @@ bitrate mid-recording, and it does so for thermal reasons (see §8) via
 as a live parameter change.
 
 Resolution requests are resolved against the device's *real* panel size
-(`util/ResolutionResolver`) and deliberately never upscaled past it — picking
-"4K" on a 1080p panel just uses the real 1080p size, since upscaling adds
-file size with zero real detail gained.
+(`util/ResolutionResolver`) but always honor the user's exact pick rather
+than silently capping it — `MediaProjection.createVirtualDisplay` can target
+any width/height regardless of the physical panel (the platform scales the
+mirrored content to fit), so there's no *technical* reason to override "4K"
+on a 1080p panel into plain 1080p. There is, however, a reason to *disclose*
+it: doing that scales up from fewer real source pixels than the label
+implies, which is a second, independent explanation for "bitrate ve
+çözünürlüğü yükselttim ama görüntü hâlâ net değil" alongside the profile/level
+one in §5 — `ResolutionResolver.isUpscaling()` drives a note under the
+Resolution slider in `MainActivity` whenever the current pick would upscale,
+naming the panel's actual native resolution so the choice stays informed
+without silently substituting a different one.
 
 ## 7. Recording-invisible control panel
 
 `overlay/RecordingOverlayController` shows the pause/stop bubble as a
 **second window**, added via `WindowManager` with
-`WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY` and, critically,
-`FLAG_SECURE`. `FLAG_SECURE` is a platform mechanism that excludes a window's
-content wherever the screen is mirrored to a non-secure destination —
-screenshots, casting, and `MediaProjection`'s `VirtualDisplay` output. Since
-the bubble is never part of `MainActivity`'s view hierarchy or any view that
-could end up composited into the capture surface, there's no per-frame
-visibility toggling to get right; the platform simply omits it. This is the
-same mechanism Samsung's own screen-recorder overlay relies on for the exact
-same "Samsung tarzı davranış" the spec asks for.
+`WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY`.
 
-The exact visual result of `FLAG_SECURE` (fully excluded vs. a blacked-out
-shape) can vary slightly by OEM skin — worth a quick confirmation on your
-actual target devices — which is why the bubble is also kept small and
-minimal as defense-in-depth regardless of that detail.
+An earlier version also set `FLAG_SECURE` on that window, reasoning that
+it's the platform mechanism for excluding a window from non-secure capture
+destinations. In practice `FLAG_SECURE`'s documented, standard behavior in a
+capture — screenshot, cast, or a `MediaProjection` `VirtualDisplay` (including
+the one this app itself creates) — is to render the secure window's bounds as
+a **solid black shape**, not to cleanly omit it and reveal whatever's
+underneath. That's correct for `FLAG_SECURE`'s actual purpose (guarantee a
+banking PIN pad can never leak into any capture path, full stop) and wrong
+for this one, and it's what the "siyah bir nokta" reports turned out to be:
+the platform doing exactly what `FLAG_SECURE` documents, not an OEM bug.
+
+There is no public API that lets a normal, non-privileged app make its own
+overlay simultaneously (a) visible live on screen and (b) cleanly excluded —
+not blacked out — from that same app's own `MediaProjection` recording.
+Samsung's recorder achieves it because it's a privileged system component
+with capture-pipeline access no third-party APK is granted; mainstream
+third-party recorders (XRecorder, ADV Screen Recorder, etc.) don't fake this
+either, and ship the same combination this app now does:
+
+1. **No `FLAG_SECURE`.** The window is an ordinary, small, translucent
+   overlay — a ~16dp dot at rest — so there is no black shape under any OEM
+   compositor, ever. It's small and low-opacity by design specifically
+   *because* it can end up in a frame now.
+2. **A real hide action** (the eye icon on the expanded row) that fully
+   detaches the window from `WindowManager` — actually removed, not shrunk
+   or made transparent — for whenever a completely clean frame matters more
+   than having the controls reachable on-screen. `RecordingService` adds a
+   "Show controls" action to the persistent recording notification while
+   hidden this way, since the bubble can't offer its own way back once it's
+   gone.
 
 ## 8. Android 8+ compatibility plan
 
@@ -201,15 +240,16 @@ minimal as defense-in-depth regardless of that detail.
 | Hardware encoder detection | Name-heuristic (`OMX.google.*` = software) | `MediaCodecInfo.isHardwareAccelerated()` |
 | System audio capture | **Not available** — recording proceeds mic-only if Audio Source needs system sound | `AudioPlaybackCaptureConfiguration` |
 | Output location | Public `Movies/RecorderX` file, needs `WRITE_EXTERNAL_STORAGE` (`maxSdkVersion=28`) | `MediaStore` insert, no storage permission needed |
-| Thermal-aware bitrate throttling | **No-op** — `PowerManager` has no thermal-status API yet | `PowerManager.addThermalStatusListener` |
+| Thermal-aware bitrate throttling | **No-op** — `PowerManager` has no thermal-status API yet | Reactive: `PowerManager.addThermalStatusListener` (API 29+). Proactive forecast layer: `PowerManager.getThermalHeadroom` (API 30+ only — no-ops on API 29) |
 | Foreground service type | Plain foreground service | Typed (`mediaProjection\|microphone`), permission-enforced from API 34 |
 | Overlay window type | `TYPE_APPLICATION_OVERLAY` (introduced exactly at API 26 — no legacy branch needed) | same |
 
 Every version-gated code path degrades to "the feature just doesn't run,"
 never to a crash — e.g. `ThermalBitrateGovernor.start()` returns immediately
-on API < 29, and `AudioMixEngine` simply doesn't attempt
-`SystemAudioSource` below API 29, falling back to mic-only if that's what
-Audio Source calls for.
+on API < 29, its proactive `getThermalHeadroom` polling additionally no-ops
+on API 29 specifically (that call needs API 30), and `AudioMixEngine` simply
+doesn't attempt `SystemAudioSource` below API 29, falling back to mic-only
+if that's what Audio Source calls for.
 
 ## 9. APK size strategy
 
@@ -243,13 +283,19 @@ workflow's comments for how it provisions the SDK and Gradle Wrapper itself).
 
 What genuinely benefits from time on a physical device, called out in code
 comments at each spot:
-- DSP constants in `DuckingProcessor`/`AudioMixEngine` (attack/release times,
-  the speech-detection RMS threshold, the soft-clip knee) — reasonable
-  starting values, worth ear-tuning against real content.
-- `FLAG_SECURE`'s exact rendering on your specific target OEM skins (§7).
-- Whether `"max-fps-to-encoder"` is honored by your target chipsets' encoders
-  (`VideoEncoderPipeline.tryLimitInputFrameRate` — purely a bonus on top of
-  bitrate throttling either way, never load-bearing).
+- DSP constants in `DuckingProcessor`/`AudioMixEngine`/`ResidualBleedSuppressor`
+  (attack/release times, the speech-detection RMS threshold, the soft-clip
+  knee, the correlation gate and max suppression depth for residual-echo
+  suppression) — reasonable starting values, worth ear-tuning against real
+  content and real speaker/mic hardware.
+- Whether `"max-fps-to-encoder"` and `KEY_OPERATING_RATE` are honored by your
+  target chipsets' encoders (`VideoEncoderPipeline` -- both are best-effort
+  hints layered on top of `ThermalBitrateGovernor`'s bitrate throttling,
+  never load-bearing on their own).
+- `ThermalBitrateGovernor`'s proactive-layer constants (`PROACTIVE_TRIGGER`,
+  `PROACTIVE_FLOOR`, the poll interval) — `getThermalHeadroom`'s forecast
+  accuracy is itself device-dependent per its own platform docs, so these are
+  reasonable starting points, not values tuned against real thermal curves.
 - The `DeviceTier` low/mid/high heuristic's exact RAM/core thresholds.
 
 None of these are correctness bugs — they're calibration, which no amount of

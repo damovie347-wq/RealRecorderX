@@ -20,6 +20,7 @@
     <string name="label_video_codec">VIDEO CODEC</string>
     <string name="label_orientation">ORIENTATION</string>
     <string name="label_resolution">RESOLUTION</string>
+    <string name="label_resolution_upscale_note">Screen\'s native resolution is %1$s — %2$s will be upscaled from that, not native %2$s detail</string>
     <string name="label_frame_rate">FRAME RATE</string>
     <string name="label_bitrate">BITRATE</string>
     <string name="label_bitrate_suggested">Suggested for your current settings: %1$s</string>
@@ -45,6 +46,8 @@
     <string name="pause_recording">PAUSE</string>
     <string name="resume_recording">RESUME</string>
     <string name="minimize_controls">Minimize</string>
+    <string name="hide_controls">Hide controls</string>
+    <string name="show_controls_action">Show controls</string>
     <string name="recording_elapsed">%1$s</string>
 
     <!-- Notification -->
@@ -69,7 +72,7 @@
     <string name="error_could_not_start">Couldn\'t start recording on this device (no usable encoder or output location).</string>
 
     <string name="guide_title">Quick guide</string>
-    <string name="guide_body">1) Pick your video and audio settings below — Bitrate updates automatically as you change Resolution/FPS/Codec.\n2) Tap Start Recording, then grant screen-capture and (if you enabled a mic source) microphone permission.\n3) Use the small floating bubble to pause, resume, or stop — it never appears in the recording itself.\n4) Files save to Movies/RecorderX and are named from your Output Template.</string>
+    <string name="guide_body">1) Pick your video and audio settings below — Bitrate updates automatically as you change Resolution/FPS/Codec.\n2) Tap Start Recording, then grant screen-capture and (if you enabled a mic source) microphone permission.\n3) Use the small floating bubble to pause, resume, or stop — it\'s kept small and out of the way, and its eye icon fully hides it whenever you want a completely clean frame.\n4) Files save to Movies/RecorderX and are named from your Output Template.</string>
     <string name="guide_close">GOT IT</string>
 
     <!-- Quick Settings tile -->
