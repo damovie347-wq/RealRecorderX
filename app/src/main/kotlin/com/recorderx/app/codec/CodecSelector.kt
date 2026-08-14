@@ -24,7 +24,14 @@ data class CodecChoice(
     val height: Int,
     val isHardware: Boolean,
     val profile: Int = 0,
-    val level: Int = 0
+    val level: Int = 0,
+    /** The fps this exact (codecName, width, height) combination can actually
+     * sustain, per this device's own declared capabilities -- may be lower
+     * than the fps the user asked for (see [findEncoderFor]'s kdoc: resolution
+     * is never sacrificed to hit a requested fps, fps is clipped instead).
+     * Callers must configure the encoder with *this*, not the raw requested
+     * fps, and should tell the user when the two disagree. */
+    val achievedFps: Int
 )
 
 object CodecSelector {
@@ -45,10 +52,19 @@ object CodecSelector {
     /**
      * Walks the cascade implied by [preference] (AV1 implies the full
      * AV1 -> HEVC -> AVC chain; H265 implies HEVC -> AVC; H264 is AVC only) and
-     * returns the first hardware encoder that can handle [targetWidth]x[targetHeight]
-     * at [targetFps]. Falls back to a software AVC encoder as an absolute last
-     * resort so recording still works on a device with no usable hardware path;
-     * callers should surface [CodecChoice.isHardware] == false to the user.
+     * returns the best hardware encoder that can handle [targetWidth]x[targetHeight],
+     * clipping fps down from [targetFps] rather than the resolution if this
+     * device's hardware genuinely can't sustain both together (see
+     * [findEncoderFor]'s kdoc). Falls back to a software AVC encoder as an
+     * absolute last resort so recording still works on a device with no
+     * usable hardware path; callers should surface [CodecChoice.isHardware]
+     * == false to the user.
+     *
+     * A mime is only skipped to the next cascade step when *no* encoder for
+     * it exists at all -- never because of a resolution/fps mismatch, which
+     * [findEncoderFor] resolves internally instead. Codec choice (which mime,
+     * which physical encoder) and capability negotiation (how big / how fast)
+     * are deliberately separate concerns.
      */
     fun findBestEncoder(
         preference: VideoCodecOption,
@@ -77,8 +93,35 @@ object CodecSelector {
     private fun findAnyEncoderFor(mime: String, w: Int, h: Int, fps: Int): CodecChoice? =
         findEncoderFor(mime, w, h, fps, hardwareOnly = false)
 
+    /**
+     * Scores *every* matching [MediaCodecInfo] for [mime] (a device can expose
+     * more than one -- some chipsets register a second, size-restricted entry
+     * for the same mime that only unlocks high fps at a much smaller
+     * resolution, e.g. a "slow-motion" capability set) and returns the single
+     * best one.
+     *
+     * "Best" means: resolution as close to the requested [w]x[h] as this
+     * device can actually do, full stop -- fps is *never* traded away for it.
+     * This replaced an earlier version that rejected a whole codec entry
+     * outright whenever [fps] exceeded [MediaCodecInfo.VideoCapabilities
+     * .getSupportedFrameRatesFor] at the *requested* size, which on a real
+     * device with exactly that kind of dual capability set meant the loop
+     * kept falling through past the entry that could do the real resolution
+     * and landed on the high-fps/tiny-resolution one instead -- the actual
+     * mechanism behind "120 fps seçtiğimde 512x512 kalitesinde çekmeye
+     * başlıyor." Only once the best-achievable resolution is fixed does this
+     * function look at what fps *that specific* encoder can sustain there,
+     * and clips down to it (never up) -- [CodecChoice.achievedFps] carries
+     * that real number back to the caller so the encoder is configured with
+     * it (not the raw request) and the user can be told when it's lower.
+     */
     private fun findEncoderFor(mime: String, w: Int, h: Int, fps: Int, hardwareOnly: Boolean): CodecChoice? {
         val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        var best: CodecChoice? = null
+        var bestAreaDeficit = Long.MAX_VALUE
+        var bestAchievedFps = -1
+        val requestedArea = w.toLong() * h.toLong()
+
         for (info in codecList.codecInfos) {
             if (!info.isEncoder) continue
             if (info.supportedTypes.none { it.equals(mime, ignoreCase = true) }) continue
@@ -93,30 +136,49 @@ object CodecSelector {
             val (adjW, adjH) = alignToSupportedSize(videoCaps, w, h) ?: continue
             if (!videoCaps.isSizeSupported(adjW, adjH)) continue
 
-            val supportedFps = try {
-                videoCaps.getSupportedFrameRatesFor(adjW, adjH)
-            } catch (e: IllegalArgumentException) {
-                null
+            // How much smaller than requested this specific encoder forces us
+            // to go -- 0 when it can do the exact requested size. This, never
+            // fps, is what picks the winner between multiple entries.
+            val areaDeficit = requestedArea - (adjW.toLong() * adjH.toLong())
+            val achievedFps = maxSustainableFps(videoCaps, adjW, adjH, fps)
+
+            val better = when {
+                best == null -> true
+                areaDeficit != bestAreaDeficit -> areaDeficit < bestAreaDeficit
+                // Tie on resolution match: prefer whichever entry sustains more fps there.
+                else -> achievedFps > bestAchievedFps
             }
-            // Not a hard requirement (some devices report frame-rate ranges
-            // conservatively) -- we only use this to prefer, not to exclude.
-            if (supportedFps != null && fps > supportedFps.upper.toInt() + 5) {
-                continue
-            }
+            if (!better) continue
 
             val (profile, level) = pickProfileLevel(mime, capabilities.profileLevels)
-
-            return CodecChoice(
+            best = CodecChoice(
                 codecName = info.name,
                 mimeType = mime,
                 width = adjW,
                 height = adjH,
                 isHardware = info.isLikelyHardware(),
                 profile = profile,
-                level = level
+                level = level,
+                achievedFps = achievedFps
             )
+            bestAreaDeficit = areaDeficit
+            bestAchievedFps = achievedFps
         }
-        return null
+        return best
+    }
+
+    /** Caps [requestedFps] down to what [caps] actually declares it can
+     * sustain at [w]x[h] -- never up, and never used to reject the encoder
+     * outright (some devices report frame-rate ranges conservatively; a
+     * clipped-but-real recording beats no recording). Null capability info
+     * (rare) is treated as "no declared ceiling," i.e. trust the request. */
+    private fun maxSustainableFps(caps: MediaCodecInfo.VideoCapabilities, w: Int, h: Int, requestedFps: Int): Int {
+        val supportedFps = try {
+            caps.getSupportedFrameRatesFor(w, h)
+        } catch (e: IllegalArgumentException) {
+            null
+        } ?: return requestedFps
+        return requestedFps.coerceAtMost(supportedFps.upper.toInt()).coerceAtLeast(1)
     }
 
     /** The profile that unlocks each codec's full compression toolset (B-frames,

@@ -16,7 +16,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
-import android.view.Surface
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.IntentCompat
@@ -25,6 +24,7 @@ import com.recorderx.app.R
 import com.recorderx.app.adaptive.ThermalBitrateGovernor
 import com.recorderx.app.audio.AudioMixEngine
 import com.recorderx.app.bitrate.BitrateAdvisor
+import com.recorderx.app.capture.FramePacer
 import com.recorderx.app.capture.ScreenCaptureController
 import com.recorderx.app.codec.CodecSelector
 import com.recorderx.app.encoder.AudioEncoderPipeline
@@ -52,9 +52,9 @@ class RecordingService : Service() {
     private var audioEncoder: AudioEncoderPipeline? = null
     private var audioMixEngine: AudioMixEngine? = null
     private var captureController: ScreenCaptureController? = null
+    private var framePacer: FramePacer? = null
     private var thermalGovernor: ThermalBitrateGovernor? = null
     private var outputTarget: RecordingOutputResolver.Output? = null
-    private var encoderInputSurface: Surface? = null
 
     private var currentSettings: RecordingSettings = RecordingSettings()
     private var captureWidth = 0
@@ -199,27 +199,43 @@ class RecordingService : Service() {
         }
         announceCodecResult(currentSettings.videoCodec, codecChoice)
 
+        // From here down, every fps reference uses codecChoice.achievedFps --
+        // the fps this exact device/codec/resolution combo can actually
+        // sustain (see CodecSelector.findEncoderFor) -- not the raw slider
+        // value, since that's the number FramePacer will really deliver.
+        val effectiveFps = codecChoice.achievedFps
+
         val bitrateBps = if (currentSettings.bitrateOption == BitrateOption.AUTO) {
-            BitrateAdvisor.suggestBitrateBps(codecChoice.width, codecChoice.height, currentSettings.frameRate.fps, codecChoice.mimeType)
+            BitrateAdvisor.suggestBitrateBps(codecChoice.width, codecChoice.height, effectiveFps, codecChoice.mimeType)
         } else {
             currentSettings.bitrateOption.bps
         }
 
         val video = VideoEncoderPipeline(muxer) { t -> handleFatalError(t) }
-        val surface = video.configure(codecChoice, bitrateBps, currentSettings.frameRate.fps, currentSettings.bitrateMode)
-        encoderInputSurface = surface
+        val surface = video.configure(codecChoice, bitrateBps, effectiveFps, currentSettings.bitrateMode)
         resolvedCaptureWidth = codecChoice.width
         resolvedCaptureHeight = codecChoice.height
         video.startDraining()
         videoEncoder = video
 
+        // FramePacer sits between the mirrored screen and the encoder's real
+        // input surface, and is the actual enforcement mechanism for the
+        // user's fps choice -- see its kdoc. MediaProjection now mirrors into
+        // pacer.virtualDisplaySurface; `surface` (the encoder's own input
+        // surface) is only ever touched by the pacer's GL thread from here on.
+        val pacer = FramePacer(
+            surface, effectiveFps, codecChoice.width, codecChoice.height
+        ) { t -> handleFatalError(t) }
+        pacer.start()
+        framePacer = pacer
+
         val capture = ScreenCaptureController(mediaProjection ?: return false)
-        capture.start(surface, codecChoice.width, codecChoice.height, captureDensity) {
+        capture.start(pacer.virtualDisplaySurface, codecChoice.width, codecChoice.height, captureDensity) {
             mainHandler.post { handleStop() }
         }
         captureController = capture
 
-        val governor = ThermalBitrateGovernor(this, video, bitrateBps, currentSettings.frameRate.fps) {
+        val governor = ThermalBitrateGovernor(this, video, pacer, bitrateBps, effectiveFps) {
             mainHandler.post { handleStop() }
         }
         governor.start()
@@ -233,12 +249,18 @@ class RecordingService : Service() {
     /** Compares what the user picked against what CodecSelector actually
      * resolved (post hardware-availability cascade) and says so plainly when
      * a fallback happened, instead of silently substituting a different
-     * codec with no indication anything changed. */
+     * codec with no indication anything changed. Also flags it when the fps
+     * itself had to be clipped (see CodecChoice.achievedFps) -- resolution is
+     * never sacrificed for fps, so on a real hardware ceiling fps is what
+     * gives, and the user should know that happened rather than just getting
+     * a quietly slower recording than requested. */
     private fun announceCodecResult(preference: com.recorderx.app.settings.VideoCodecOption, choice: com.recorderx.app.codec.CodecChoice) {
         val resolvedLabel = mimeToLabel(choice.mimeType)
         val fellBack = mimeToPreference(choice.mimeType) != preference
+        val fpsClipped = choice.achievedFps < currentSettings.frameRate.fps
         Log.i(TAG, "announceCodecResult(): preference=$preference resolved=$resolvedLabel " +
-            "size=${choice.width}x${choice.height} fps=${currentSettings.frameRate.fps} fellBack=$fellBack")
+            "size=${choice.width}x${choice.height} requestedFps=${currentSettings.frameRate.fps} " +
+            "achievedFps=${choice.achievedFps} fellBack=$fellBack")
         mainHandler.post {
             if (fellBack) {
                 Toast.makeText(
@@ -247,7 +269,14 @@ class RecordingService : Service() {
                     Toast.LENGTH_LONG
                 ).show()
             }
-            val summary = "$resolvedLabel · ${choice.width}x${choice.height} · ${currentSettings.frameRate.fps}fps"
+            if (fpsClipped) {
+                Toast.makeText(
+                    this,
+                    getString(R.string.toast_fps_capped, currentSettings.frameRate.fps, choice.achievedFps),
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            val summary = "$resolvedLabel · ${choice.width}x${choice.height} · ${choice.achievedFps}fps"
             Toast.makeText(this, getString(R.string.toast_recording_summary, summary), Toast.LENGTH_SHORT).show()
         }
     }
@@ -335,6 +364,7 @@ class RecordingService : Service() {
         pausedAccumulatedMs = SystemClock.elapsedRealtime() - recordingStartElapsedRealtime + pausedAccumulatedMs
         captureController?.stop()
         captureController = null
+        framePacer?.pause()
         audioFrameOffset = audioMixEngine?.totalFramesWritten ?: audioFrameOffset
         audioMixEngine?.stop()
         audioMixEngine = null
@@ -350,11 +380,12 @@ class RecordingService : Service() {
         recordingStartElapsedRealtime = SystemClock.elapsedRealtime()
 
         videoEncoder?.requestPauseRebase()
-        val surface = encoderInputSurface
+        val pacer = framePacer
         val projection = mediaProjection
-        if (surface != null && projection != null) {
+        if (pacer != null && projection != null) {
+            pacer.resume()
             val capture = ScreenCaptureController(projection)
-            capture.start(surface, videoEncoderCaptureWidth(), videoEncoderCaptureHeight(), captureDensity) {
+            capture.start(pacer.virtualDisplaySurface, videoEncoderCaptureWidth(), videoEncoderCaptureHeight(), captureDensity) {
                 mainHandler.post { handleStop() }
             }
             captureController = capture
@@ -388,6 +419,8 @@ class RecordingService : Service() {
         mainHandler.removeCallbacks(tickRunnable)
 
         captureController?.stop()
+        framePacer?.release()
+        framePacer = null
         thermalGovernor?.stop()
         audioMixEngine?.stop()
         videoEncoder?.requestStop()
@@ -427,6 +460,9 @@ class RecordingService : Service() {
         try {
             mediaProjectionCallback?.let { mediaProjection?.unregisterCallback(it) }
         } catch (e: Exception) { /* nothing registered yet */ }
+        captureController?.stop()
+        framePacer?.release()
+        framePacer = null
         mediaProjection?.stop()
         mediaProjection = null
         muxerController?.release()
@@ -445,6 +481,8 @@ class RecordingService : Service() {
         if (mediaProjection != null) {
             // Process death / task removal without a clean Stop tap -- best-effort teardown.
             captureController?.stop()
+            framePacer?.release()
+            framePacer = null
             thermalGovernor?.stop()
             audioMixEngine?.stop()
             try { videoEncoder?.requestStop() } catch (e: Exception) { }

@@ -289,9 +289,9 @@ comments at each spot:
   suppression) — reasonable starting values, worth ear-tuning against real
   content and real speaker/mic hardware.
 - Whether `"max-fps-to-encoder"` and `KEY_OPERATING_RATE` are honored by your
-  target chipsets' encoders (`VideoEncoderPipeline` -- both are best-effort
-  hints layered on top of `ThermalBitrateGovernor`'s bitrate throttling,
-  never load-bearing on their own).
+  target chipsets' encoders (`VideoEncoderPipeline` -- both are now a
+  defensive extra layer, not the actual fps enforcement mechanism; see §11
+  and `FramePacer`'s kdoc for what replaced them).
 - `ThermalBitrateGovernor`'s proactive-layer constants (`PROACTIVE_TRIGGER`,
   `PROACTIVE_FLOOR`, the poll interval) — `getThermalHeadroom`'s forecast
   accuracy is itself device-dependent per its own platform docs, so these are
@@ -300,3 +300,93 @@ comments at each spot:
 
 None of these are correctness bugs — they're calibration, which no amount of
 static review substitutes for real hardware.
+
+## 11. Fixes applied — Aug 2026
+
+Seven issues reported against a real build, all traced to a real mechanism
+(not surface-level patches) and fixed at that mechanism. Full reasoning lives
+in each file's kdoc; this is the map of what changed and where.
+
+1. **"4K/2K/1080p/720p/480p don't produce those exact pixel sizes."**
+   `ResolutionOption` (`settings/SettingsModels.kt`) now carries a fixed,
+   exact 16:9 `(longEdge, shortEdge)` pair per tier instead of deriving the
+   short edge from the panel's own aspect ratio — on any panel that isn't
+   exactly 16:9 (most tablets, including the one these reports came from),
+   the derived value matched neither the panel nor the label. `NATIVE` is
+   unchanged: it still follows the real panel size on purpose. See
+   `ResolutionResolver`'s kdoc.
+2. **"120 fps records at 512x512 regardless of the resolution I picked."**
+   `CodecSelector.findEncoderFor` (`codec/CodecSelector.kt`) used to reject a
+   codec entry outright when it couldn't hit the requested fps *at the
+   requested size*, which on a device exposing a second, size-restricted
+   capability entry for the same mime (common — a "high fps, small size"
+   entry alongside the normal one) meant the loop fell through past the
+   entry that could do the real resolution and landed on that one instead.
+   It now scores every candidate by resolution match first, full stop, and
+   only clips fps (down, at the *chosen* resolution) as the very last step —
+   resolution is never traded away for fps. The clipped number comes back as
+   `CodecChoice.achievedFps` and everything downstream (bitrate suggestion,
+   encoder config, the pacer's target, the thermal governor's baseline) uses
+   it instead of the raw slider value; `RecordingService` tells the user
+   when it had to clip.
+3. **"Whatever fps I set, actual output is a different, wrong fps."** The
+   real fix, not a tweak: `capture/FramePacer.kt` (+ `EglCore.kt`) is a new
+   GPU stage between `MediaProjection`'s mirrored screen and the encoder's
+   input surface. `KEY_MAX_FPS_TO_ENCODER` (still set, now just a defensive
+   extra) is an unreliable, not-universally-honored vendor hint; a
+   Surface-input encoder otherwise receives a new frame every time
+   SurfaceFlinger recomposites, i.e. at whatever the *content* and the
+   panel's refresh rate produce, not the configured fps. FramePacer instead
+   owns delivery outright: a dedicated thread redraws the latest mirrored
+   frame onto the encoder's surface on a fixed, drift-free `1/fps` schedule
+   it controls itself. `ThermalBitrateGovernor`'s fps cap now also calls
+   `FramePacer.setTargetFps` — under the old model that call only adjusted a
+   hint the encoder might ignore; now it directly changes what's delivered.
+4. **"Recording controls appear live but shouldn't be baked into the
+   video, like Samsung's recorder."** Not fixable outright — confirmed
+   against current platform docs, not just repeated from an earlier
+   assessment: there is still no public API letting a normal app keep its
+   own overlay simultaneously visible and cleanly excluded (not blacked out)
+   from that same app's own `MediaProjection` capture. `FLAG_SECURE` blacks
+   the window out instead of omitting it; Android 14's single-app capture
+   mode excludes system UI, not a third-party app's own floating overlay,
+   and would mean the recording could never follow the user across apps —
+   not a viable trade for a general screen recorder. `RecordingOverlayController`
+   keeps the existing no-`FLAG_SECURE` + real hide-button design and adds an
+   automatic idle fade (full opacity on touch, eases to 32% after 2.5s idle)
+   as a genuine, if partial, reduction in how much of the recording it's
+   actually noticeable in.
+5. **"High fps/resolution/bitrate, still soft/blurry, almost gaussian."**
+   No single separate cause — the dominant contributor was #2 above (the
+   actual encoded size silently collapsing well below what the resolution
+   picker showed inflates perceived softness the most). What's left after
+   that fix is upscaling from a real panel below the requested tier, which
+   is physical, not a bug (see `ResolutionResolver.isUpscaling` — the UI
+   already discloses it), plus whatever profile/level and bitrate headroom
+   `CodecSelector.pickProfileLevel` / `BitrateAdvisor` already resolve.
+6. **"Optimize CPU/GPU/battery/heat."** FramePacer (#3) is a net win here,
+   not just a correctness fix: it caps encoder input to *exactly* the
+   requested fps, where the old uncontrolled path could feed the encoder up
+   to (panel refresh rate / requested fps) times more frames than needed —
+   e.g. a 120Hz panel recording at 30fps previously could push the encoder
+   up to 4x harder than necessary. The pacer's own cost is one GPU texture
+   blit per output frame, no CPU-side pixel copy. `ThermalBitrateGovernor`
+   is otherwise unchanged and still the primary thermal defense.
+7. **"System audio + mic echoes/doubles."** `AcousticEchoCanceler` (used
+   when available in `MicAudioSource`) isn't guaranteed to exist at all —
+   common on tablets — and `ResidualBleedSuppressor`, the app's own
+   correlation-based second layer, searched only a +/-10-sample
+   (~+/-0.2ms @48kHz) window for the delay between the mic and the system-audio
+   reference. That's the acoustic speaker-to-mic air gap alone; it ignored
+   Android's real playback-to-capture round trip, which commonly runs tens
+   of milliseconds and can exceed 100ms on non-"Pro Audio" hardware — so the
+   search essentially never found where the real echo actually landed. It
+   now keeps a rolling ~220ms reference history and searches that full range
+   (a cheap stepped coarse pass + a fine pass locked around both the coarse
+   winner and the previous tick's lag), so it can actually find and suppress
+   real-world bleed instead of only ever seeing content it correctly reads
+   as unrelated to the reference.
+
+Not touched: none of the above needed changes to `MuxerController`,
+`AudioEncoderPipeline`, `DuckingProcessor`, `BitrateAdvisor`, or `DeviceTier`
+— those were already doing what their kdoc says.

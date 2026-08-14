@@ -58,10 +58,11 @@
     <string name="notification_paused_text">Paused · %1$s</string>
 
     <!-- Permission / capability messaging -->
-    <string name="permission_rationale_overlay">RecorderX needs the \"draw over other apps\" permission so the recording controls can stay off the recording itself.</string>
+    <string name="permission_rationale_overlay">RecorderX needs the \"draw over other apps\" permission so the pause/stop controls can float on screen during recording, without pulling down the notification panel.</string>
     <string name="toast_mic_denied">Microphone permission denied — recording system audio only.</string>
     <string name="toast_no_hardware_encoder">No hardware video encoder matched these settings; falling back to the most compatible software encoder. Expect higher CPU use.</string>
     <string name="toast_codec_fallback">%1$s isn\'t supported on this device — recording with %2$s instead.</string>
+    <string name="toast_fps_capped">%1$d fps isn\'t sustainable at this resolution on this device — recording at %2$d fps instead (resolution is kept, never shrunk, to hit an fps target).</string>
     <string name="toast_recording_summary">Recording: %1$s</string>
     <string name="toast_no_audio_captured">No audio was captured — check that microphone permission is granted, and that the app/game you\'re recording allows its audio to be captured.</string>
     <string name="toast_system_audio_unavailable">System audio unavailable this session (the app you\'re recording may not allow audio capture) — recording microphone only.</string>

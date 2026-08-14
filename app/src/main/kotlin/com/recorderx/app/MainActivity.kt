@@ -500,7 +500,11 @@ class MainActivity : AppCompatActivity() {
         val target = ResolutionResolver.resolve(this, settings.resolution, settings.orientation)
         val choice = CodecSelector.findBestEncoder(settings.videoCodec, target.width, target.height, settings.frameRate.fps)
         val mime = choice?.mimeType ?: android.media.MediaFormat.MIMETYPE_VIDEO_AVC
-        val suggestedBps = BitrateAdvisor.suggestBitrateBps(target.width, target.height, settings.frameRate.fps, mime)
+        // Use the fps this device can actually sustain at this resolution, not
+        // the raw slider value, so the suggestion matches what will really be
+        // encoded (see CodecChoice.achievedFps / CodecSelector.findEncoderFor).
+        val effectiveFps = choice?.achievedFps ?: settings.frameRate.fps
+        val suggestedBps = BitrateAdvisor.suggestBitrateBps(target.width, target.height, effectiveFps, mime)
         bitrateSuggestionLabel.text = getString(R.string.label_bitrate_suggested, BitrateAdvisor.formatMbps(suggestedBps))
     }
 

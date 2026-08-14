@@ -6,7 +6,6 @@ import android.view.Surface
 import android.view.WindowManager
 import com.recorderx.app.settings.OrientationOption
 import com.recorderx.app.settings.ResolutionOption
-import kotlin.math.roundToInt
 
 /**
  * Pure resolution math, deliberately called from MainActivity (an Activity
@@ -25,20 +24,23 @@ import kotlin.math.roundToInt
  * platform scales the mirrored content to fit), so there's no technical
  * reason to override the choice -- only a reason to disclose it, which
  * [isUpscaling] is for.
+ *
+ * Non-NATIVE picks use [ResolutionOption]'s fixed, exact standard pair
+ * (e.g. 3840x2160 for "4K") rather than a size recomputed from the panel's
+ * own aspect ratio -- see the kdoc on [ResolutionOption] for why: on any
+ * panel that isn't exactly 16:9, aspect-correcting silently produced a size
+ * that matched neither the panel nor the label.
  */
 object ResolutionResolver {
 
     data class Target(val width: Int, val height: Int)
 
     fun resolve(context: Context, resolution: ResolutionOption, orientation: OrientationOption): Target {
-        val panel = DeviceTier.panelResolutionPx(context) // portrait-normalized: x <= y
-
         val (shortEdge, longEdge) = if (resolution == ResolutionOption.NATIVE) {
+            val panel = DeviceTier.panelResolutionPx(context) // portrait-normalized: x <= y
             panel.x to panel.y
         } else {
-            val aspect = panel.x.toDouble() / panel.y.toDouble()
-            val computedShort = (resolution.longEdge * aspect).roundToInt().coerceAtLeast(2)
-            computedShort to resolution.longEdge
+            resolution.shortEdge to resolution.longEdge
         }
 
         val wantsLandscape = when (orientation) {
@@ -48,7 +50,7 @@ object ResolutionResolver {
         }
 
         val target = if (wantsLandscape) Target(longEdge, shortEdge) else Target(shortEdge, longEdge)
-        Log.i(TAG, "resolve(): option=$resolution panel=${panel.x}x${panel.y} -> target=${target.width}x${target.height}")
+        Log.i(TAG, "resolve(): option=$resolution -> target=${target.width}x${target.height}")
         return target
     }
 

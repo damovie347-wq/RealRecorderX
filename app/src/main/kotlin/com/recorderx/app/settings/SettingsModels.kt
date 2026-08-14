@@ -24,16 +24,25 @@ enum class OrientationOption(val label: String) {
     LANDSCAPE("LAND")
 }
 
-/** Actual pixel targets are resolved at record time against the device's real
- * panel size (see util/DeviceTier.kt#panelResolution) -- these are targets,
- * not guarantees, since the encoder may need to round to an aligned size. */
-enum class ResolutionOption(val label: String, val longEdge: Int) {
-    NATIVE("NATIVE", 0), // 0 == "use the panel's real resolution, unscaled"
-    UHD_4K("4K", 3840),
-    QHD_2K("2K", 2560),
-    FHD("FHD", 1920),
-    HD("HD", 1280),
-    SD_480("480", 854)
+/** Fixed, exact industry-standard 16:9 pixel targets (long edge x short edge,
+ * i.e. the landscape-oriented pair -- ResolutionResolver swaps them for
+ * portrait). These are deliberately NOT derived from the device's panel
+ * aspect ratio: an earlier version recomputed the short edge from the real
+ * panel's aspect (e.g. 3840 x round(3840*panelAspect)), which on any panel
+ * that isn't exactly 16:9 (most tablets are 16:10, 4:3, or similar) silently
+ * produced a size that was neither the panel's native resolution nor the
+ * standard resolution the label promised -- "I picked 4K but didn't get
+ * 3840x2160." Locking these to the literal standard values is what the user
+ * picking "4K" actually expects, matching every other camera/recorder app.
+ * NATIVE is the one exception, by design: it deliberately follows the real
+ * panel size (see [ResolutionResolver]), not a fixed pair. */
+enum class ResolutionOption(val label: String, val longEdge: Int, val shortEdge: Int) {
+    NATIVE("NATIVE", 0, 0), // 0,0 == "use the panel's real resolution, unscaled"
+    UHD_4K("4K", 3840, 2160),
+    QHD_2K("2K", 2560, 1440),
+    FHD("FHD", 1920, 1080),
+    HD("HD", 1280, 720),
+    SD_480("480", 854, 480)
 }
 
 enum class FrameRateOption(val label: String, val fps: Int) {

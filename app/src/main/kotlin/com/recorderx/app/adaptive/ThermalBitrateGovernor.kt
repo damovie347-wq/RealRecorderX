@@ -46,6 +46,7 @@ import com.recorderx.app.encoder.VideoEncoderPipeline
 class ThermalBitrateGovernor(
     private val context: Context,
     private val videoEncoder: VideoEncoderPipeline,
+    private val framePacer: com.recorderx.app.capture.FramePacer,
     private val baseBitrateBps: Int,
     private val configuredFps: Int,
     private val onEmergencyStop: () -> Unit
@@ -131,11 +132,21 @@ class ThermalBitrateGovernor(
         }
         applyCombinedBitrate()
 
+        // videoEncoder.tryLimitInputFrameRate() stays as a defensive,
+        // best-effort extra layer (see its own kdoc), but framePacer is what
+        // actually enforces this now -- it owns delivery cadence to the
+        // encoder outright, so this is the call that reliably reduces heat/
+        // encode load under real thermal pressure rather than just hoping a
+        // vendor driver honors a hint.
         if (status >= PowerManager.THERMAL_STATUS_SEVERE) {
-            videoEncoder.tryLimitInputFrameRate(minOf(configuredFps, 30))
+            val capped = minOf(configuredFps, 30)
+            videoEncoder.tryLimitInputFrameRate(capped)
+            framePacer.setTargetFps(capped)
         }
         if (status >= PowerManager.THERMAL_STATUS_CRITICAL) {
-            videoEncoder.tryLimitInputFrameRate(minOf(configuredFps, 24))
+            val capped = minOf(configuredFps, 24)
+            videoEncoder.tryLimitInputFrameRate(capped)
+            framePacer.setTargetFps(capped)
         }
         if (status >= PowerManager.THERMAL_STATUS_EMERGENCY) {
             onEmergencyStop()

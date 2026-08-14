@@ -2,6 +2,8 @@ package com.recorderx.app.overlay
 
 import android.content.Context
 import android.graphics.PixelFormat
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.ContextThemeWrapper
 import android.view.Gravity
@@ -62,6 +64,13 @@ import kotlin.math.abs
  *    adds a "Show controls" action to the persistent recording notification
  *    while hidden this way, since the bubble obviously can't offer its own
  *    "bring me back" tap target once it's gone.
+ * 3. An automatic idle fade: after [IDLE_FADE_DELAY_MS] with no touch, the
+ *    bubble eases down to [IDLE_ALPHA] opacity and stays there until touched
+ *    again. It's still technically part of every frame captured while idle,
+ *    but far less visually intrusive than sitting at full opacity for the
+ *    entire recording when in practice the user only actually touches it
+ *    twice (pause, stop) -- a real, if partial, reduction in how much of the
+ *    recording it's actually noticeable in, on top of (1) and (2) above.
  */
 class RecordingOverlayController(private val context: Context) {
 
@@ -70,6 +79,9 @@ class RecordingOverlayController(private val context: Context) {
     private var rootView: View? = null
     private var layoutParams: WindowManager.LayoutParams? = null
     private var expanded = false
+
+    private val fadeHandler = Handler(Looper.getMainLooper())
+    private val fadeOutRunnable = Runnable { rootView?.animate()?.alpha(IDLE_ALPHA)?.setDuration(250)?.start() }
 
     private var dragDownRawX = 0f
     private var dragDownRawY = 0f
@@ -123,6 +135,7 @@ class RecordingOverlayController(private val context: Context) {
         rootView = view
         layoutParams = lp
         expanded = false
+        scheduleIdleFade()
     }
 
     /** Toggling GONE<->VISIBLE on whichever row isn't showing naturally
@@ -154,6 +167,7 @@ class RecordingOverlayController(private val context: Context) {
      * operation, just with different callers. */
     fun hide() {
         val view = rootView ?: return
+        fadeHandler.removeCallbacks(fadeOutRunnable)
         try {
             windowManager.removeView(view)
         } catch (e: IllegalArgumentException) {
@@ -163,7 +177,18 @@ class RecordingOverlayController(private val context: Context) {
         layoutParams = null
     }
 
+    /** Cancels any pending fade-out and restores full opacity immediately (a
+     * touch is direct evidence the user is looking right at it), then
+     * re-arms the countdown from zero. Called on every touch event, not just
+     * taps, so an in-progress drag never fades out from under the finger. */
+    private fun scheduleIdleFade() {
+        fadeHandler.removeCallbacks(fadeOutRunnable)
+        rootView?.animate()?.alpha(1f)?.setDuration(120)?.start()
+        fadeHandler.postDelayed(fadeOutRunnable, IDLE_FADE_DELAY_MS)
+    }
+
     private fun handleTouch(event: MotionEvent, lp: WindowManager.LayoutParams, onTap: () -> Unit): Boolean {
+        if (event.action == MotionEvent.ACTION_DOWN) scheduleIdleFade()
         return when (event.action) {
             MotionEvent.ACTION_DOWN -> {
                 dragDownRawX = event.rawX
@@ -202,5 +227,10 @@ class RecordingOverlayController(private val context: Context) {
         } catch (e: IllegalArgumentException) {
             // View was detached mid-gesture (e.g. recording stopped) -- ignore.
         }
+    }
+
+    companion object {
+        private const val IDLE_FADE_DELAY_MS = 2_500L
+        private const val IDLE_ALPHA = 0.32f
     }
 }

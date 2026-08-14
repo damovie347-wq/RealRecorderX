@@ -46,7 +46,7 @@ class AudioMixEngine(
     // ResidualBleedSuppressor's kdoc for why AEC alone often isn't enough
     // for loud game/media content. Only ever engages when both sources are
     // actually active (see mixLoop); a no-op the rest of the time.
-    private val bleedSuppressor = ResidualBleedSuppressor()
+    private val bleedSuppressor = ResidualBleedSuppressor(sampleRate)
 
     private var mixThread: Thread? = null
     @Volatile private var running = false
