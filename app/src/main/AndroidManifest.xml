@@ -14,10 +14,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- "Draw over other apps" — needed for the recording control bubble
-         (overlay/RecordingOverlayController.kt). Note this permission makes
-         the bubble *possible*, not excluded from capture -- see that class's
-         kdoc for why a normal app's overlay can't be both live-visible and
-         cleanly excluded from its own MediaProjection recording. -->
+     (overlay/RecordingOverlayController.kt). Note this permission makes
+     the bubble *possible*, not excluded from capture, see that class's
+     kdoc for why a normal app's overlay can't be both live-visible and
+     cleanly excluded from its own MediaProjection recording. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!-- Only needed pre-scoped-storage. From Android 10 (API 29) onward, saving
