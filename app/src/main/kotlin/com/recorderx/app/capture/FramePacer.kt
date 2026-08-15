@@ -57,6 +57,18 @@ import java.util.concurrent.locks.LockSupport
  * frame looks exactly like a SurfaceFlinger-produced one, just arriving on a
  * cleaner schedule.
  *
+ * ## A pitfall this class already hit once
+ * A freshly constructed `SurfaceTexture(texName)` defaults to a **1x1**
+ * buffer size until [SurfaceTexture.setDefaultBufferSize] says otherwise.
+ * `MediaCodec`'s own input surface never has this problem (its buffer
+ * geometry comes from the codec's configured format), so this is easy to
+ * miss when the mental model is "just point VirtualDisplay at a Surface" --
+ * omitting it once shipped a build where MediaProjection composited every
+ * real frame into a 1x1 buffer and the shader below faithfully stretched
+ * that single pixel across the whole output: a flat, wrong-colored frame,
+ * every frame, looking exactly like "recorded nothing." [glThreadBody] now
+ * calls it explicitly and comments why, right at the call site.
+ *
  * ## Cost
  * One GPU texture sample + blit per output frame, at exactly the configured
  * fps (never more) -- cheaper than the *uncontrolled* frame flow it replaces
@@ -94,6 +106,7 @@ class FramePacer(
     private var surfaceTexture: SurfaceTexture? = null
     private var signalThread: HandlerThread? = null
     private val hasFirstFrame = AtomicBoolean(false)
+    private var tickCount = 0L
 
     private val vertexBuffer = floatBufferOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
     private val texCoordBuffer = floatBufferOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
@@ -160,6 +173,7 @@ class FramePacer(
             egl.makeCurrent(surface)
 
             oesTextureId = createOesTexture()
+            checkGlError("createOesTexture")
             program = buildProgram(VERTEX_SHADER, FRAGMENT_SHADER)
             aPositionLoc = GLES20.glGetAttribLocation(program, "aPosition")
             aTexCoordLoc = GLES20.glGetAttribLocation(program, "aTexCoord")
@@ -170,8 +184,21 @@ class FramePacer(
             // default, since it costs nothing and removes any doubt.
             GLES20.glUseProgram(program)
             GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "sTexture"), 0)
+            checkGlError("program setup")
 
             val st = SurfaceTexture(oesTextureId)
+            // CRITICAL: a freshly constructed SurfaceTexture defaults to a
+            // 1x1 buffer size until told otherwise. MediaCodec's own input
+            // surface never has this problem (its buffer geometry comes from
+            // the codec's configured format), which is exactly why this was
+            // invisible before FramePacer existed -- VirtualDisplay used to
+            // mirror straight into that surface. Now that VirtualDisplay
+            // mirrors into *this* SurfaceTexture instead, skipping this call
+            // means every real frame gets composited into a 1x1 buffer and
+            // the shader below then stretches that single pixel across the
+            // whole output -- a flat, wrong-colored frame every time, which
+            // is exactly the "recorded nothing" symptom this fixes.
+            st.setDefaultBufferSize(width, height)
             surfaceTexture = st
             virtualDisplaySurface = Surface(st)
 
@@ -232,8 +259,15 @@ class FramePacer(
             val surface = eglSurface
             if (surface != null) {
                 drawFrame()
+                checkGlError("drawFrame")
                 egl.setPresentationTime(surface, System.nanoTime())
-                egl.swapBuffers(surface)
+                if (!egl.swapBuffers(surface)) {
+                    Log.w(TAG, "eglSwapBuffers() returned false on tick #$tickCount")
+                }
+                if (tickCount == 0L) {
+                    Log.i(TAG, "FramePacer: first real frame drawn (${width}x$height, target ${targetFps}fps)")
+                }
+                tickCount++
             }
 
             val frameIntervalNs = 1_000_000_000L / targetFps.coerceAtLeast(1)
@@ -282,6 +316,18 @@ class FramePacer(
         if (oesTextureId != 0) try { GLES20.glDeleteTextures(1, intArrayOf(oesTextureId), 0) } catch (e: Exception) { /* ignore */ }
         eglSurface?.let { try { egl.releaseSurface(it) } catch (e: Exception) { /* ignore */ } }
         try { egl.release() } catch (e: Exception) { /* ignore */ }
+    }
+
+    /** Logs (doesn't throw -- a single bad frame shouldn't kill the whole
+     * recording) any pending GL error under [op]'s name, so a regression here
+     * shows up unmistakably in logcat instead of silently rendering wrong
+     * content -- exactly the class of bug the missing setDefaultBufferSize
+     * call above was before this was added. */
+    private fun checkGlError(op: String) {
+        val err = GLES20.glGetError()
+        if (err != GLES20.GL_NO_ERROR) {
+            Log.e(TAG, "GL error after $op: 0x${Integer.toHexString(err)}")
+        }
     }
 
     private fun createOesTexture(): Int {
