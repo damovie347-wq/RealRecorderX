@@ -54,7 +54,7 @@ The settings screen is one `ScrollView` over a programmatically-built
 Compose. Every slider (codec, resolution, fps, bitrate, the 0-200% level
 sliders, everything) is the same `SegmentedSliderView`: a `Canvas`-drawn pill
 track, a yellow fill up to the thumb, small tick dots per step, a black
-thumb. One class, reused ~14 times, driven entirely by data (a list of step
+thumb. One class, reused ~18 times, driven entirely by data (a list of step
 labels + a starting index) rather than N near-duplicate custom views.
 
 Deliberately **not** Compose: the spec's own top priorities are minimal CPU
@@ -160,6 +160,43 @@ defaults to H.264; everything else defaults to the full AV1 cascade, so
 capable devices get the most efficient codec automatically while older/
 weaker ones get the safest one, matching the spec exactly.
 
+### 5a. Software AV1 (opt-in) and 10-bit
+
+Two settings layer onto the cascade above without changing its shape for
+anyone who leaves them at their defaults:
+
+- **`Av1SoftwareFallback.ON`** inserts one extra step, *only* when the user's
+  preference is AV1: right after hardware AV1 fails and before falling to
+  HEVC/AVC hardware, `CodecSelector.findSoftwareAv1Encoder` explicitly
+  searches for a non-hardware AV1 encoder (AOSP ships a libaom-based one on
+  updated Android 14+ media modules, registered in `MediaCodecList` like any
+  other). Before this existed, the cascade's *only* non-hardware attempt was
+  AVC — AV1 itself was never tried without hardware, so a device with a real
+  software AV1 path still silently landed on a different codec. Two hard
+  caps, both because CPU-bound throughput has no relationship to a hardware
+  block's: only attempted when the already-resolved target is at or under
+  1080p (never a silent resize — above that this step is simply skipped and
+  the cascade continues to HEVC/AVC hardware), and fps is pre-clamped to 30
+  rather than trusting the software codec's own declared ceiling.
+- **`ColorDepthOption.TEN_BIT`** changes which profile `CodecSelector` accepts
+  as a match: `pickProfileLevel` requires an exact Main10-family profile
+  (`HEVCProfileMain10`/`AV1ProfileMain10` and their HDR10/HDR10+ variants) and
+  returns `null` — meaning "skip this codec candidate entirely" — for
+  anything that doesn't advertise one, rather than silently accepting an
+  8-bit profile under a 10-bit label. AVC is never considered for 10-bit at
+  all (`AVCProfileHigh10` exists as a constant but has no meaningful hardware
+  or software presence on real devices). If nothing anywhere in the cascade
+  can do it, `findBestEncoder` retries the *entire* cascade once at 8-bit,
+  and `CodecChoice.colorDepth` on the result tells `RecordingService` this
+  happened so it can toast about it — exactly the `achievedFps` pattern,
+  applied to color depth. Worth being explicit about *why* this is offered
+  at all: `MediaProjection` mirrors whatever SurfaceFlinger already
+  composited, which is ordinary 8-bit RGBA8888 for the overwhelming majority
+  of Android content — 10-bit here is a wider, correctly-configured container
+  around that same information, not new detail, unless the content itself is
+  genuinely HDR. See `ColorDepthOption`'s kdoc and `label_color_depth_note`
+  for how that's disclosed in the UI rather than oversold.
+
 ## 6. Bitrate & resolution suggestion system
 
 `bitrate/BitrateAdvisor` uses the standard bits-per-pixel-per-frame estimate:
@@ -179,7 +216,14 @@ sahnelerde azaltılsın" without any extra machinery. `adaptive/
 ThermalBitrateGovernor` is the one thing that *actively* changes the target
 bitrate mid-recording, and it does so for thermal reasons (see §8) via
 `MediaCodec.PARAMETER_KEY_VIDEO_BITRATE`, which most hardware encoders honor
-as a live parameter change.
+as a live parameter change. Every stage of that governor was silent to the
+user by design (deliberately not a pop-up per degree of throttling) until
+`onThrottleChanged` was added: it fires only when the *combined* fraction
+crosses a real, reportable threshold, so `RecordingService` can say "your
+device is warming up, bitrate reduced" instead of a long gaming-session
+recording just getting quietly softer partway through with no visible cause
+— previously indistinguishable from the app (or the user's settings) being
+broken.
 
 Resolution requests are resolved against the device's *real* panel size
 (`util/ResolutionResolver`) but always honor the user's exact pick rather
@@ -218,19 +262,36 @@ not blacked out — from that same app's own `MediaProjection` recording.
 Samsung's recorder achieves it because it's a privileged system component
 with capture-pipeline access no third-party APK is granted; mainstream
 third-party recorders (XRecorder, ADV Screen Recorder, etc.) don't fake this
-either, and ship the same combination this app now does:
+either. Rather than pick one fixed compromise, `OverlayVisibilityMode` gives
+the person recording the actual trade-off directly:
 
-1. **No `FLAG_SECURE`.** The window is an ordinary, small, translucent
-   overlay — a ~16dp dot at rest — so there is no black shape under any OEM
-   compositor, ever. It's small and low-opacity by design specifically
-   *because* it can end up in a frame now.
-2. **A real hide action** (the eye icon on the expanded row) that fully
-   detaches the window from `WindowManager` — actually removed, not shrunk
-   or made transparent — for whenever a completely clean frame matters more
-   than having the controls reachable on-screen. `RecordingService` adds a
-   "Show controls" action to the persistent recording notification while
-   hidden this way, since the bubble can't offer its own way back once it's
-   gone.
+1. **VISIBLE (default): no `FLAG_SECURE`.** The window is an ordinary, small,
+   translucent overlay — a ~16dp dot at rest — so there is no black shape
+   under any OEM compositor, ever. It's small and low-opacity by design
+   specifically *because* it can end up in a frame in this mode.
+2. **AUTO_HIDE.** Same window, but `RecordingService.showOverlayIfEnabled`
+   schedules `autoHideOverlayRunnable` a few seconds after every show — the
+   exact same code path a manual eye-icon tap takes (`handleHideOverlay`),
+   just triggered by a timer instead of a touch. Reachable afterward only via
+   the notification's "Show controls" action or the Quick Settings tile — the
+   cleanest frames this app can offer, traded for the bubble not being an
+   on-screen tap target most of the time.
+3. **BLACKOUT.** Restores `FLAG_SECURE` specifically on this window
+   (`RecordingOverlayController.show(blackout = true, ...)`) for anyone who's
+   decided a small solid-black shape is preferable to legible controls
+   appearing in their footage — the trade-off VISIBLE mode defaults away
+   from, now opt-in rather than forced either way.
+
+On top of whichever mode is active: a **real hide action** (the eye icon on
+the expanded row) that fully detaches the window from `WindowManager` —
+actually removed, not shrunk or made transparent — for whenever a completely
+clean frame matters more than having the controls reachable on-screen, and
+an **automatic idle fade** (full opacity on touch, eases to 32% after 2.5s
+idle) that reduces how much of the recording VISIBLE/BLACKOUT are actually
+noticeable in without needing a tap. `RecordingService` adds a "Show
+controls" notification action whenever the bubble is currently detached
+(user-hidden or AUTO_HIDE), since it can't offer its own way back once it's
+gone.
 
 ## 8. Android 8+ compatibility plan
 
@@ -243,6 +304,8 @@ either, and ship the same combination this app now does:
 | Thermal-aware bitrate throttling | **No-op** — `PowerManager` has no thermal-status API yet | Reactive: `PowerManager.addThermalStatusListener` (API 29+). Proactive forecast layer: `PowerManager.getThermalHeadroom` (API 30+ only — no-ops on API 29) |
 | Foreground service type | Plain foreground service | Typed (`mediaProjection\|microphone`), permission-enforced from API 34 |
 | Overlay window type | `TYPE_APPLICATION_OVERLAY` (introduced exactly at API 26 — no legacy branch needed) | same |
+| Software AV1 encoder (`Av1SoftwareFallback.ON`) | Not expected — AOSP's libaom-based software AV1 encoder ships on updated Android 14+ media modules | Present on capable devices; `CodecSelector.findSoftwareAv1Encoder` simply finds nothing and the cascade continues to HEVC/AVC either way, so this degrades the same "feature just doesn't run" way as everything else in this table |
+| 10-bit encoder profiles (`ColorDepthOption.TEN_BIT`) | Hardware-dependent at any API level, not an API-level gate itself | Same — `pickProfileLevel` finds nothing and `findBestEncoder` retries at 8-bit regardless of platform version |
 
 Every version-gated code path degrades to "the feature just doesn't run,"
 never to a crash — e.g. `ThermalBitrateGovernor.start()` returns immediately
@@ -285,9 +348,16 @@ What genuinely benefits from time on a physical device, called out in code
 comments at each spot:
 - DSP constants in `DuckingProcessor`/`AudioMixEngine`/`ResidualBleedSuppressor`
   (attack/release times, the speech-detection RMS threshold, the soft-clip
-  knee, the correlation gate and max suppression depth for residual-echo
-  suppression) — reasonable starting values, worth ear-tuning against real
-  content and real speaker/mic hardware.
+  knee, the correlation gate and max suppression depth per `BleedSuppressionMode`
+  strength) — reasonable, now-retuned-once-against-a-real-report starting
+  values (see §12 item 2), still worth further ear-tuning against real
+  content and real speaker/mic hardware, especially per device.
+- `ThermalBitrateGovernor`'s `onThrottleChanged` report threshold
+  (`REPORT_EPSILON`) and the software-AV1 caps in
+  `CodecSelector.findSoftwareAv1Encoder` (`SOFTWARE_AV1_MAX_FPS` = 30,
+  1080p) — reasonable, conservative starting points chosen without a
+  physical device to measure real sustained CPU-encode throughput or real
+  toast-frequency annoyance against; both are easy to loosen once measured.
 - Whether `"max-fps-to-encoder"` and `KEY_OPERATING_RATE` are honored by your
   target chipsets' encoders (`VideoEncoderPipeline` -- both are now a
   defensive extra layer, not the actual fps enforcement mechanism; see §11
@@ -390,3 +460,73 @@ in each file's kdoc; this is the map of what changed and where.
 Not touched: none of the above needed changes to `MuxerController`,
 `AudioEncoderPipeline`, `DuckingProcessor`, `BitrateAdvisor`, or `DeviceTier`
 — those were already doing what their kdoc says.
+
+## 12. Fixes applied — round 2
+
+Four issues reported against a build that already included round 1 (§11) —
+three of them the *same symptoms* recurring (expected: §11 already flagged
+upscaling and the overlay both as physical/platform limits it could disclose
+but not eliminate), one genuinely new. Each is fixed at a real mechanism, not
+patched at the symptom.
+
+1. **"2K/4K still not crisp, especially deeper into a long (gaming)
+   recording."** §11's fixes (profile/level, the real fps-capability
+   collapse, upscale disclosure) already addressed the *static* causes.
+   What's new: `ThermalBitrateGovernor` was — correctly, by design — cutting
+   live bitrate under real thermal pressure with zero user-facing signal
+   anywhere. A screen recorder actively encoding *and* driving a hot game on
+   screen is exactly the scenario that reaches that governor's stages, so a
+   recording that started sharp and got visibly softer 10 minutes in was
+   this working as intended, indistinguishable from a bug from the user's
+   side. `onThrottleChanged` (new) fires on a real combined-fraction change;
+   `RecordingService.announceThermalThrottle` toasts both the drop and the
+   recovery. Also added: an explicit `toast_resolution_capped` when the
+   *chosen codec's own* capability (not a mime fallback, which already had
+   its own toast) forces a smaller size than requested — previously only
+   visible in the always-shown summary toast, easy to miss.
+2. **"System audio + mic still doubles on loud transients (an explosion
+   plays twice)."** `ResidualBleedSuppressor` already existed (§11 #7 fixed
+   its search *window*); this time the reported failure mode was depth and
+   speed, not search range — a 20dB ceiling and 60ms attack that a short,
+   loud, percussive sound could mostly finish playing through before
+   suppression caught up. Retuned to 26dB/35ms as the new NORMAL default,
+   added a 34dB/20ms STRONG option, and exposed both plus OFF as
+   `BleedSuppressionMode` instead of one fixed, silent value. Paired with a
+   new zero-cost mitigation: `AudioMixEngine.isLikelyUsingBuiltInSpeaker`
+   checks for *any* connected external audio output device, and
+   `RecordingService.announceHeadphoneTipIfNeeded` suggests a headset once
+   (ever, not per session, via `SettingsRepository.hasShownHeadphoneTip`)
+   when Sys+Mic recording starts with none connected — a headset removes the
+   acoustic bleed at its physical source, which no amount of after-the-fact
+   software suppression can do as completely.
+3. **"Recording controls appear live but shouldn't be baked into the video,
+   like Samsung's recorder."** Re-confirmed against current platform docs,
+   not just repeated: still genuinely not achievable by a non-privileged
+   app — see §7's rewrite. What's new is not pretending there's one right
+   answer: `OverlayVisibilityMode` (VISIBLE / AUTO_HIDE / BLACKOUT) lets the
+   person recording pick which specific trade-off they'd rather live with,
+   instead of the app picking once for everyone.
+4. **"AV1 recording silently does nothing on a device without hardware
+   AV1; want CPU-based AV1 up to 1080p instead, plus an 8-bit/10-bit
+   choice."** The actual gap: `CodecSelector.findBestEncoder`'s cascade
+   only ever searched `hardwareOnly = true` for every mime including AV1,
+   and its one non-hardware attempt was hardcoded to AVC — so even on a
+   device with AOSP's real libaom-based software AV1 encoder, AV1 itself was
+   never once tried without hardware; the cascade just silently moved on to
+   HEVC/AVC hardware. `findSoftwareAv1Encoder` (new, opt-in via
+   `Av1SoftwareFallback.ON`) is the missing attempt, inserted right after
+   hardware AV1 and before HEVC/AVC so it's honored ahead of a
+   faster/cooler substitute codec — capped at 1080p and a conservative
+   30fps because CPU-bound throughput has no relationship to a hardware
+   block's, and *never* silently resizing the user's exact resolution pick
+   above that (the step is just skipped instead). `ColorDepthOption` was
+   added alongside it: `pickProfileLevel` now requires an exact Main10-family
+   profile match at 10-bit and returns `null` (skip this candidate) rather
+   than silently accepting an 8-bit profile under a 10-bit label; if nothing
+   in the whole cascade can do it, `findBestEncoder` retries once at 8-bit
+   and says so via `CodecChoice.colorDepth` / `toast_color_depth_fallback`.
+
+Not touched this round: `MuxerController`, `AudioEncoderPipeline`,
+`DuckingProcessor`, `BitrateAdvisor`, `DeviceTier`, `ScreenCaptureController`,
+`FramePacer`, `EglCore`, `RecordingOutputResolver`, `RecordingTileService` —
+none of round 2's four reports traced back to any of them.

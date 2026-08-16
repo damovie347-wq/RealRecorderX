@@ -38,6 +38,16 @@ import com.recorderx.app.encoder.VideoEncoderPipeline
  * early nudge layered *underneath* the reactive thresholds below, not a
  * replacement for them.
  *
+ * Every stage here is silent to the user by design -- deliberately not a
+ * pop-up-per-degree-of-throttling. [onThrottleChanged] is the one exception:
+ * it fires when the *combined* fraction crosses a real, reportable threshold
+ * (see [applyCombinedBitrate]), specifically so a caller can tell the user
+ * *why* a recording made during a long gaming session got visibly softer
+ * partway through instead of leaving them to assume the app (or their
+ * settings) are just broken -- this governor doing exactly its documented
+ * job, with nothing surfacing that fact anywhere, was previously
+ * indistinguishable from that from the user's side.
+ *
  * Reactive layer no-ops below API 29 (no thermal-status API at all);
  * proactive layer no-ops below API 30 (no [PowerManager.getThermalHeadroom]).
  * Recording still works on older platforms, it just doesn't get this
@@ -49,6 +59,14 @@ class ThermalBitrateGovernor(
     private val framePacer: com.recorderx.app.capture.FramePacer,
     private val baseBitrateBps: Int,
     private val configuredFps: Int,
+    /** Fired whenever the *combined* throttle fraction (see
+     * [applyCombinedBitrate]) actually changes, so a caller can tell the user
+     * quality dipped for thermal reasons instead of leaving them to notice a
+     * softer recording with no explanation -- previously this whole class ran
+     * silently end to end. [fraction] is 1.0 at "no throttling"; 1.0 is only
+     * ever reported once, on the way back up, so a caller can also say
+     * "back to normal" instead of just going quiet. */
+    private val onThrottleChanged: (fraction: Double) -> Unit = {},
     private val onEmergencyStop: () -> Unit
 ) {
     private var powerManager: PowerManager? = null
@@ -57,6 +75,7 @@ class ThermalBitrateGovernor(
 
     private var reactiveFraction = 1.0
     private var proactiveFraction = 1.0
+    private var lastReportedFraction = 1.0
     @Volatile private var running = false
 
     private val headroomPoll = object : Runnable {
@@ -154,11 +173,23 @@ class ThermalBitrateGovernor(
     }
 
     /** Whichever layer currently wants the *lower* bitrate wins -- the two
-     * are independent inputs to one shared ceiling, never additive. */
+     * are independent inputs to one shared ceiling, never additive. Also the
+     * single place that decides whether to fire [onThrottleChanged]: only
+     * when the combined fraction has moved by more than [REPORT_EPSILON]
+     * since the last time it was reported, so the proactive layer's frequent
+     * small adjustments near its own trigger threshold don't spam a toast
+     * every [HEADROOM_POLL_INTERVAL_MS]. */
     private fun applyCombinedBitrate() {
         val fraction = minOf(reactiveFraction, proactiveFraction)
         val target = (baseBitrateBps * fraction).toInt().coerceAtLeast(MIN_BITRATE_BPS)
         videoEncoder.applyBitrate(target)
+
+        if (kotlin.math.abs(fraction - lastReportedFraction) >= REPORT_EPSILON ||
+            (fraction >= 1.0 && lastReportedFraction < 1.0)
+        ) {
+            lastReportedFraction = fraction
+            onThrottleChanged(fraction)
+        }
     }
 
     companion object {
@@ -178,5 +209,11 @@ class ThermalBitrateGovernor(
         // caps bitrate at 85% -- deliberately gentle; the reactive listener
         // still owns the harder cuts once SEVERE/CRITICAL is actually reached.
         private const val PROACTIVE_FLOOR = 0.85
+
+        // Minimum change in the combined throttle fraction before
+        // onThrottleChanged fires again -- keeps the proactive layer's
+        // frequent small nudges near its own trigger threshold from
+        // producing a new toast every single poll.
+        private const val REPORT_EPSILON = 0.05
     }
 }

@@ -31,8 +31,11 @@ import com.recorderx.app.encoder.AudioEncoderPipeline
 import com.recorderx.app.encoder.MuxerController
 import com.recorderx.app.encoder.VideoEncoderPipeline
 import com.recorderx.app.overlay.RecordingOverlayController
+import com.recorderx.app.settings.Av1SoftwareFallback
 import com.recorderx.app.settings.AudioSourceOption
 import com.recorderx.app.settings.BitrateOption
+import com.recorderx.app.settings.ColorDepthOption
+import com.recorderx.app.settings.OverlayVisibilityMode
 import com.recorderx.app.settings.RecordingSettings
 import com.recorderx.app.settings.SettingsRepository
 import com.recorderx.app.storage.RecordingOutputResolver
@@ -95,6 +98,13 @@ class RecordingService : Service() {
             mainHandler.postDelayed(this, 1000)
         }
     }
+
+    /** Only ever scheduled when OverlayVisibilityMode.AUTO_HIDE is selected
+     * -- see showOverlayIfEnabled. Goes through the exact same path a manual
+     * eye-icon tap would (overlayHiddenByUser = true, "Show controls" surfaced
+     * on the notification), so there is only ever one "the bubble is gone"
+     * code path to reason about, not two. */
+    private val autoHideOverlayRunnable = Runnable { handleHideOverlay() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -189,14 +199,11 @@ class RecordingService : Service() {
             currentSettings.videoCodec,
             captureWidth,
             captureHeight,
-            currentSettings.frameRate.fps
+            currentSettings.frameRate.fps,
+            currentSettings.colorDepth,
+            currentSettings.av1SoftwareFallback == Av1SoftwareFallback.ON
         ) ?: return false
 
-        if (!codecChoice.isHardware) {
-            mainHandler.post {
-                Toast.makeText(this, R.string.toast_no_hardware_encoder, Toast.LENGTH_LONG).show()
-            }
-        }
         announceCodecResult(currentSettings.videoCodec, codecChoice)
 
         // From here down, every fps reference uses codecChoice.achievedFps --
@@ -235,9 +242,15 @@ class RecordingService : Service() {
         }
         captureController = capture
 
-        val governor = ThermalBitrateGovernor(this, video, pacer, bitrateBps, effectiveFps) {
-            mainHandler.post { handleStop() }
-        }
+        val governor = ThermalBitrateGovernor(
+            context = this,
+            videoEncoder = video,
+            framePacer = pacer,
+            baseBitrateBps = bitrateBps,
+            configuredFps = effectiveFps,
+            onThrottleChanged = { fraction -> mainHandler.post { announceThermalThrottle(fraction) } },
+            onEmergencyStop = { mainHandler.post { handleStop() } }
+        )
         governor.start()
         thermalGovernor = governor
 
@@ -253,15 +266,39 @@ class RecordingService : Service() {
      * itself had to be clipped (see CodecChoice.achievedFps) -- resolution is
      * never sacrificed for fps, so on a real hardware ceiling fps is what
      * gives, and the user should know that happened rather than just getting
-     * a quietly slower recording than requested. */
+     * a quietly slower recording than requested. Same treatment for
+     * resolution (when the *chosen* codec's own capability, not a codec
+     * fallback, is what forced a smaller size) and for color depth (when
+     * 10-bit was requested but nothing in the cascade could actually do it). */
     private fun announceCodecResult(preference: com.recorderx.app.settings.VideoCodecOption, choice: com.recorderx.app.codec.CodecChoice) {
         val resolvedLabel = mimeToLabel(choice.mimeType)
         val fellBack = mimeToPreference(choice.mimeType) != preference
         val fpsClipped = choice.achievedFps < currentSettings.frameRate.fps
+        val isSoftwareAv1 = !choice.isHardware && choice.mimeType == android.media.MediaFormat.MIMETYPE_VIDEO_AV1
+        val resolutionCapped = !fellBack && (choice.width.toLong() * choice.height.toLong()) <
+            (captureWidth.toLong() * captureHeight.toLong()) * RESOLUTION_CAP_REPORT_THRESHOLD_NUM / RESOLUTION_CAP_REPORT_THRESHOLD_DEN
+        val colorDepthFellBack = currentSettings.colorDepth == ColorDepthOption.TEN_BIT &&
+            choice.colorDepth == ColorDepthOption.EIGHT_BIT
+
         Log.i(TAG, "announceCodecResult(): preference=$preference resolved=$resolvedLabel " +
-            "size=${choice.width}x${choice.height} requestedFps=${currentSettings.frameRate.fps} " +
-            "achievedFps=${choice.achievedFps} fellBack=$fellBack")
+            "size=${choice.width}x${choice.height} requestedSize=${captureWidth}x${captureHeight} " +
+            "requestedFps=${currentSettings.frameRate.fps} achievedFps=${choice.achievedFps} " +
+            "fellBack=$fellBack isSoftwareAv1=$isSoftwareAv1 resolutionCapped=$resolutionCapped " +
+            "colorDepthFellBack=$colorDepthFellBack isHardware=${choice.isHardware}")
+
         mainHandler.post {
+            when {
+                // A user-requested, opted-in software AV1 encode isn't a
+                // fallback to apologize for -- it's exactly what
+                // Av1SoftwareFallback.ON was turned on to get -- so it gets
+                // its own, differently-worded toast instead of the generic
+                // "no hardware encoder matched" one.
+                isSoftwareAv1 -> Toast.makeText(this, R.string.toast_software_av1, Toast.LENGTH_LONG).show()
+                !choice.isHardware -> Toast.makeText(this, R.string.toast_no_hardware_encoder, Toast.LENGTH_LONG).show()
+            }
+            if (colorDepthFellBack) {
+                Toast.makeText(this, R.string.toast_color_depth_fallback, Toast.LENGTH_LONG).show()
+            }
             if (fellBack) {
                 Toast.makeText(
                     this,
@@ -276,8 +313,34 @@ class RecordingService : Service() {
                     Toast.LENGTH_LONG
                 ).show()
             }
-            val summary = "$resolvedLabel · ${choice.width}x${choice.height} · ${choice.achievedFps}fps"
+            if (resolutionCapped) {
+                Toast.makeText(
+                    this,
+                    getString(
+                        R.string.toast_resolution_capped,
+                        "${captureWidth}\u00D7${captureHeight}",
+                        "${choice.width}\u00D7${choice.height}"
+                    ),
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            val depthSuffix = if (choice.colorDepth == ColorDepthOption.TEN_BIT) " · 10-bit" else ""
+            val summary = "$resolvedLabel$depthSuffix · ${choice.width}x${choice.height} · ${choice.achievedFps}fps"
             Toast.makeText(this, getString(R.string.toast_recording_summary, summary), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Wired to ThermalBitrateGovernor.onThrottleChanged -- see that class's
+     * kdoc for why this exists at all. `fraction >= 1.0` is specifically the
+     * "back to normal" case, so a person who noticed the earlier toast also
+     * gets told when it's over instead of just guessing from the picture
+     * quality recovering on its own. */
+    private fun announceThermalThrottle(fraction: Double) {
+        if (fraction >= 1.0) {
+            Toast.makeText(this, R.string.toast_thermal_recovered, Toast.LENGTH_SHORT).show()
+        } else {
+            val percent = (fraction * 100).toInt()
+            Toast.makeText(this, getString(R.string.toast_thermal_throttled, percent), Toast.LENGTH_LONG).show()
         }
     }
 
@@ -341,6 +404,24 @@ class RecordingService : Service() {
             encoder.requestStop()
         }
         announceAudioResult(mixer)
+        announceHeadphoneTipIfNeeded()
+    }
+
+    /** Complementary, zero-cost mitigation to ResidualBleedSuppressor (see its
+     * kdoc): software suppression cleans up bleed after the fact, but a
+     * headset removes it at the acoustic source entirely, so telling the
+     * person *before* they record -- once, not on every session -- is worth
+     * doing even though it can't be the only fix. Only relevant when both
+     * system and mic audio are actually being captured together (mic-only or
+     * system-only has no bleed to speak of) and there's currently no external
+     * output route connected. */
+    private fun announceHeadphoneTipIfNeeded() {
+        val bothSources = currentSettings.audioSource.wantsSystem && currentSettings.audioSource.wantsMic
+        if (!bothSources) return
+        if (!AudioMixEngine.isLikelyUsingBuiltInSpeaker(this)) return
+        if (settingsRepository.hasShownHeadphoneTip()) return
+        settingsRepository.setHeadphoneTipShown()
+        mainHandler.post { Toast.makeText(this, R.string.toast_headphones_recommended, Toast.LENGTH_LONG).show() }
     }
 
     // ---- Pause / resume ------------------------------------------------
@@ -417,6 +498,7 @@ class RecordingService : Service() {
     private fun handleStop() {
         if (mediaProjection == null) return
         mainHandler.removeCallbacks(tickRunnable)
+        mainHandler.removeCallbacks(autoHideOverlayRunnable)
 
         captureController?.stop()
         framePacer?.release()
@@ -504,11 +586,22 @@ class RecordingService : Service() {
     private fun showOverlayIfEnabled() {
         if (!currentSettings.floatingBubbleEnabled) return
         overlayHiddenByUser = false
+        mainHandler.removeCallbacks(autoHideOverlayRunnable)
         overlayController.show(
+            blackout = currentSettings.overlayVisibility == OverlayVisibilityMode.BLACKOUT,
             onTogglePauseResume = { handleTogglePause() },
             onStop = { handleStop() },
             onHide = { handleHideOverlay() }
         )
+        // AUTO_HIDE: reachable for a few seconds (enough to actually see and
+        // confirm it landed where expected), then detaches itself exactly
+        // like a manual eye-icon tap would -- see OverlayVisibilityMode's
+        // kdoc. Re-armed on every show(), including the notification's
+        // "Show controls" action, so a person who explicitly asked to see it
+        // again still gets the same few-second window before it's gone again.
+        if (currentSettings.overlayVisibility == OverlayVisibilityMode.AUTO_HIDE) {
+            mainHandler.postDelayed(autoHideOverlayRunnable, AUTO_HIDE_DELAY_MS)
+        }
     }
 
     /** Wired to the overlay's own "eye" button (see RecordingOverlayController).
@@ -518,6 +611,7 @@ class RecordingService : Service() {
      * on the persistent notification since the bubble can't offer its own
      * way back once it's gone. */
     private fun handleHideOverlay() {
+        mainHandler.removeCallbacks(autoHideOverlayRunnable)
         overlayController.hide()
         overlayHiddenByUser = true
         refreshNotification()
@@ -616,6 +710,20 @@ class RecordingService : Service() {
         private const val TAG = "RecordingService"
         private const val CHANNEL_ID = "recorderx_recording"
         private const val NOTIFICATION_ID = 42
+
+        // Below this fraction of the requested capture area, RecordingService
+        // tells the user their resolution pick was capped by the codec's own
+        // capability (not by a codec-mime fallback, which already gets its
+        // own toast) -- see announceCodecResult. 9/10 rather than a float so
+        // the comparison in announceCodecResult stays exact integer math.
+        private const val RESOLUTION_CAP_REPORT_THRESHOLD_NUM = 9L
+        private const val RESOLUTION_CAP_REPORT_THRESHOLD_DEN = 10L
+
+        // How long the floating bubble stays reachable after a recording
+        // starts when OverlayVisibilityMode.AUTO_HIDE is selected, before it
+        // detaches itself exactly like a manual eye-icon tap would -- see
+        // showOverlayIfEnabled / scheduleAutoHideIfNeeded.
+        private const val AUTO_HIDE_DELAY_MS = 3_000L
 
         const val ACTION_START = "com.recorderx.app.action.START"
         const val ACTION_STOP = "com.recorderx.app.action.STOP"

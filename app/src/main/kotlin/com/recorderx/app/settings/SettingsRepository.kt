@@ -45,6 +45,8 @@ class SettingsRepository(context: Context) {
             bitrateOption = parseBitrateOption(prefs.getString(KEY_BITRATE, null)) ?: defaults.bitrateOption,
             bitrateMode = parseBitrateMode(prefs.getString(KEY_BITRATE_MODE, null)) ?: defaults.bitrateMode,
             advancedBitrateUnlocked = prefs.getBoolean(KEY_ADV_BITRATE, defaults.advancedBitrateUnlocked),
+            colorDepth = parseColorDepth(prefs.getString(KEY_COLOR_DEPTH, null)) ?: defaults.colorDepth,
+            av1SoftwareFallback = parseAv1SoftwareFallback(prefs.getString(KEY_AV1_SW_FALLBACK, null)) ?: defaults.av1SoftwareFallback,
             audioSource = parseAudioSource(prefs.getString(KEY_AUDIO_SOURCE, null)) ?: defaults.audioSource,
             audioQuality = parseAudioQuality(prefs.getString(KEY_AUDIO_QUALITY, null)) ?: defaults.audioQuality,
             audioChannel = parseAudioChannel(prefs.getString(KEY_AUDIO_CHANNEL, null)) ?: defaults.audioChannel,
@@ -54,7 +56,9 @@ class SettingsRepository(context: Context) {
             micLevelPercent = prefs.getInt(KEY_MIC_LEVEL, defaults.micLevelPercent),
             audioMix = parseAudioMix(prefs.getString(KEY_AUDIO_MIX, null)) ?: defaults.audioMix,
             audioMonitoring = parseAudioMonitoring(prefs.getString(KEY_AUDIO_MONITORING, null)) ?: defaults.audioMonitoring,
+            bleedSuppression = parseBleedSuppression(prefs.getString(KEY_BLEED_SUPPRESSION, null)) ?: defaults.bleedSuppression,
             floatingBubbleEnabled = prefs.getBoolean(KEY_BUBBLE, defaults.floatingBubbleEnabled),
+            overlayVisibility = parseOverlayVisibility(prefs.getString(KEY_OVERLAY_VISIBILITY, null)) ?: defaults.overlayVisibility,
             outputTemplate = prefs.getString(KEY_TEMPLATE, defaults.outputTemplate) ?: defaults.outputTemplate
         )
 
@@ -77,6 +81,8 @@ class SettingsRepository(context: Context) {
             .putString(KEY_BITRATE, settings.bitrateOption.name)
             .putString(KEY_BITRATE_MODE, settings.bitrateMode.name)
             .putBoolean(KEY_ADV_BITRATE, settings.advancedBitrateUnlocked)
+            .putString(KEY_COLOR_DEPTH, settings.colorDepth.name)
+            .putString(KEY_AV1_SW_FALLBACK, settings.av1SoftwareFallback.name)
             .putString(KEY_AUDIO_SOURCE, settings.audioSource.name)
             .putString(KEY_AUDIO_QUALITY, settings.audioQuality.name)
             .putString(KEY_AUDIO_CHANNEL, settings.audioChannel.name)
@@ -86,7 +92,9 @@ class SettingsRepository(context: Context) {
             .putInt(KEY_MIC_LEVEL, settings.micLevelPercent)
             .putString(KEY_AUDIO_MIX, settings.audioMix.name)
             .putString(KEY_AUDIO_MONITORING, settings.audioMonitoring.name)
+            .putString(KEY_BLEED_SUPPRESSION, settings.bleedSuppression.name)
             .putBoolean(KEY_BUBBLE, settings.floatingBubbleEnabled)
+            .putString(KEY_OVERLAY_VISIBILITY, settings.overlayVisibility.name)
             .putString(KEY_TEMPLATE, settings.outputTemplate)
             .apply()
         Log.i(TAG, "save(): codec=${settings.videoCodec} resolution=${settings.resolution} fps=${settings.frameRate.fps}")
@@ -97,6 +105,12 @@ class SettingsRepository(context: Context) {
     }
 
     fun getLastRecordingUri(): String? = prefs.getString(KEY_LAST_RECORDING, null)
+
+    /** One-shot flag for the "use headphones for cleaner audio" tip (see
+     * RecordingService#announceHeadphoneTipIfNeeded) -- shown at most once
+     * ever, not once per recording, so it informs without nagging. */
+    fun hasShownHeadphoneTip(): Boolean = prefs.getBoolean(KEY_HEADPHONE_TIP_SHOWN, false)
+    fun setHeadphoneTipShown() { prefs.edit().putBoolean(KEY_HEADPHONE_TIP_SHOWN, true).apply() }
 
     // -- Explicit, non-generic parsers. Verbose on purpose; see class kdoc. --
 
@@ -117,6 +131,18 @@ class SettingsRepository(context: Context) {
 
     private fun parseBitrateMode(raw: String?): BitrateMode? =
         try { raw?.let { BitrateMode.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseColorDepth(raw: String?): ColorDepthOption? =
+        try { raw?.let { ColorDepthOption.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseAv1SoftwareFallback(raw: String?): Av1SoftwareFallback? =
+        try { raw?.let { Av1SoftwareFallback.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseOverlayVisibility(raw: String?): OverlayVisibilityMode? =
+        try { raw?.let { OverlayVisibilityMode.valueOf(it) } } catch (e: IllegalArgumentException) { null }
+
+    private fun parseBleedSuppression(raw: String?): BleedSuppressionMode? =
+        try { raw?.let { BleedSuppressionMode.valueOf(it) } } catch (e: IllegalArgumentException) { null }
 
     private fun parseAudioSource(raw: String?): AudioSourceOption? =
         try { raw?.let { AudioSourceOption.valueOf(it) } } catch (e: IllegalArgumentException) { null }
@@ -149,6 +175,8 @@ class SettingsRepository(context: Context) {
         private const val KEY_BITRATE = "bitrate"
         private const val KEY_BITRATE_MODE = "bitrate_mode"
         private const val KEY_ADV_BITRATE = "advanced_bitrate"
+        private const val KEY_COLOR_DEPTH = "color_depth"
+        private const val KEY_AV1_SW_FALLBACK = "av1_software_fallback"
         private const val KEY_AUDIO_SOURCE = "audio_source"
         private const val KEY_AUDIO_QUALITY = "audio_quality"
         private const val KEY_AUDIO_CHANNEL = "audio_channel"
@@ -158,8 +186,11 @@ class SettingsRepository(context: Context) {
         private const val KEY_MIC_LEVEL = "mic_level"
         private const val KEY_AUDIO_MIX = "audio_mix"
         private const val KEY_AUDIO_MONITORING = "audio_monitoring"
+        private const val KEY_BLEED_SUPPRESSION = "bleed_suppression"
         private const val KEY_BUBBLE = "floating_bubble"
+        private const val KEY_OVERLAY_VISIBILITY = "overlay_visibility"
         private const val KEY_TEMPLATE = "output_template"
         private const val KEY_LAST_RECORDING = "last_recording_uri"
+        private const val KEY_HEADPHONE_TIP_SHOWN = "headphone_tip_shown"
     }
 }

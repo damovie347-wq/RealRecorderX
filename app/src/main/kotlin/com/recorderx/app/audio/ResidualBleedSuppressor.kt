@@ -1,5 +1,6 @@
 package com.recorderx.app.audio
 
+import com.recorderx.app.settings.BleedSuppressionMode
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -64,7 +65,49 @@ import kotlin.math.sqrt
  * through, just less attenuated than moments that are pure bleed with no
  * voice in them at all.
  */
-class ResidualBleedSuppressor(sampleRate: Int) {
+class ResidualBleedSuppressor(
+    sampleRate: Int,
+    /** How hard this layer is allowed to pull the mic down once it's
+     * confident a chunk is bleed -- see [com.recorderx.app.settings.BleedSuppressionMode].
+     * The original tuning (20dB, a 60ms attack) turned out to be too gentle
+     * for the case that actually matters most: a loud, percussive game sound
+     * (an explosion, gunfire) played through the phone's own speaker at
+     * volume with no headset, a few cm from the mic -- reported back as
+     * "the same explosion sound plays twice." NORMAL below raises the
+     * ceiling and quickens the attack from those original values; STRONG
+     * goes further for anyone whose device/content still isn't fully
+     * cleaned up at NORMAL. */
+    strength: BleedSuppressionMode = BleedSuppressionMode.NORMAL
+) {
+    private val maxSuppressionDb: Float
+    private val correlationGate: Float
+    private val attackMs: Float
+    private val releaseMs: Float
+
+    init {
+        when (strength) {
+            BleedSuppressionMode.OFF -> {
+                // Never actually consulted -- AudioMixEngine skips this class
+                // entirely at OFF -- but every field still needs a value.
+                maxSuppressionDb = 0f
+                correlationGate = 1f
+                attackMs = ATTACK_MS_NORMAL
+                releaseMs = RELEASE_MS_NORMAL
+            }
+            BleedSuppressionMode.NORMAL -> {
+                maxSuppressionDb = MAX_SUPPRESSION_DB_NORMAL
+                correlationGate = CORRELATION_GATE_NORMAL
+                attackMs = ATTACK_MS_NORMAL
+                releaseMs = RELEASE_MS_NORMAL
+            }
+            BleedSuppressionMode.STRONG -> {
+                maxSuppressionDb = MAX_SUPPRESSION_DB_STRONG
+                correlationGate = CORRELATION_GATE_STRONG
+                attackMs = ATTACK_MS_STRONG
+                releaseMs = RELEASE_MS_NORMAL
+            }
+        }
+    }
 
     // Rolling history of reference (system-audio) samples, long enough to
     // cover HISTORY_MS of real-world playback+capture round-trip latency.
@@ -75,7 +118,7 @@ class ResidualBleedSuppressor(sampleRate: Int) {
     private val history = FloatArray(historyCapacity)
     private var historyFilled = 0
 
-    // 0 = no extra suppression right now, 1 = fully at MAX_SUPPRESSION_DB.
+    // 0 = no extra suppression right now, 1 = fully at maxSuppressionDb.
     private var smoothedSuppression = 0f
 
     // Last lag (in samples, "reference audio this far back explains today's
@@ -112,7 +155,7 @@ class ResidualBleedSuppressor(sampleRate: Int) {
         // Below the gate, today's mic content reads as independent of the
         // reference (real speech, room noise, silence) -- leave it alone.
         // Above it, map the remaining headroom to 0..1 suppression strength.
-        val bleedLikelihood = ((correlation - CORRELATION_GATE) / (1f - CORRELATION_GATE)).coerceIn(0f, 1f)
+        val bleedLikelihood = ((correlation - correlationGate) / (1f - correlationGate)).coerceIn(0f, 1f)
         return advance(bleedLikelihood, chunkDurationMs)
     }
 
@@ -190,10 +233,10 @@ class ResidualBleedSuppressor(sampleRate: Int) {
     }
 
     private fun advance(target: Float, chunkDurationMs: Float): Float {
-        val timeConstantMs = if (target > smoothedSuppression) ATTACK_MS else RELEASE_MS
+        val timeConstantMs = if (target > smoothedSuppression) attackMs else releaseMs
         val step = (chunkDurationMs / timeConstantMs).coerceIn(0f, 1f)
         smoothedSuppression += (target - smoothedSuppression) * step
-        val suppressionDb = smoothedSuppression * MAX_SUPPRESSION_DB
+        val suppressionDb = smoothedSuppression * maxSuppressionDb
         return dbToLinear(-suppressionDb)
     }
 
@@ -225,18 +268,36 @@ class ResidualBleedSuppressor(sampleRate: Int) {
 
         // Correlation below this reads as independent content (real speech,
         // ambient noise) and is left untouched; only the remaining headroom
-        // above it maps into suppression strength.
-        private const val CORRELATION_GATE = 0.30f
+        // above it maps into suppression strength. Lower at STRONG so more
+        // borderline content still counts as "probably bleed."
+        private const val CORRELATION_GATE_NORMAL = 0.30f
+        private const val CORRELATION_GATE_STRONG = 0.22f
 
         // Never fully mutes the mic: caps how much this layer can pull it
         // down so speech spoken *over* game audio still comes through,
         // attenuated less than moments that are pure bleed with no voice in
-        // them. Ear-tuning this against real content/devices -- like the DSP
-        // constants in DuckingProcessor -- is exactly the sort of thing
-        // ARCHITECTURE.md already flags as benefiting from real hardware.
-        private const val MAX_SUPPRESSION_DB = 20f
+        // them. The original single value here was 20dB, which real-world
+        // reports ("a loud game explosion still audibly plays twice") showed
+        // wasn't enough headroom for genuinely loud, percussive
+        // speaker-to-mic bleed with no headset -- NORMAL below raises that
+        // ceiling; STRONG goes further still. Ear-tuning these exact numbers
+        // against real content/devices -- like the DSP constants in
+        // DuckingProcessor -- is exactly the sort of thing ARCHITECTURE.md
+        // already flags as benefiting from real hardware.
+        private const val MAX_SUPPRESSION_DB_NORMAL = 26f
+        private const val MAX_SUPPRESSION_DB_STRONG = 34f
 
-        private const val ATTACK_MS = 60f   // clamp down quickly once bleed is detected
-        private const val RELEASE_MS = 220f // release a bit slower to avoid audible chattering
+        // How quickly this layer clamps down once bleed is detected. The
+        // original 60ms attack was slow enough that a short, percussive
+        // transient (an explosion, a gunshot) could already be most of the
+        // way through before suppression caught up with it -- exactly the
+        // content most likely to be reported as "plays twice." NORMAL below
+        // is snappier; STRONG snappier still. Release is left alone (220ms)
+        // at both strengths -- easing back up slowly is what avoids audible
+        // pumping/chattering once the bleed passes, and that part wasn't
+        // what was reported as wrong.
+        private const val ATTACK_MS_NORMAL = 35f
+        private const val ATTACK_MS_STRONG = 20f
+        private const val RELEASE_MS_NORMAL = 220f
     }
 }

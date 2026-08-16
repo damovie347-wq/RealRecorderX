@@ -11,6 +11,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.recorderx.app.encoder.AudioEncoderPipeline
 import com.recorderx.app.settings.AudioChannelMode
+import com.recorderx.app.settings.BleedSuppressionMode
 import com.recorderx.app.settings.MicGainMode
 import com.recorderx.app.settings.RecordingSettings
 import kotlin.math.abs
@@ -44,9 +45,14 @@ class AudioMixEngine(
     // Second-stage defense against system audio bleeding back into the mic
     // through the speaker, on top of MicAudioSource's platform AEC -- see
     // ResidualBleedSuppressor's kdoc for why AEC alone often isn't enough
-    // for loud game/media content. Only ever engages when both sources are
-    // actually active (see mixLoop); a no-op the rest of the time.
-    private val bleedSuppressor = ResidualBleedSuppressor(sampleRate)
+    // for loud game/media content. Null at BleedSuppressionMode.OFF so the
+    // mix loop can skip the correlation search entirely rather than just
+    // discarding its result -- that search is cheap (see that class's kdoc)
+    // but still real per-chunk work with no reason to pay it once a person
+    // has explicitly turned this layer off.
+    private val bleedSuppressor: ResidualBleedSuppressor? =
+        if (settings.bleedSuppression == BleedSuppressionMode.OFF) null
+        else ResidualBleedSuppressor(sampleRate, settings.bleedSuppression)
 
     private var mixThread: Thread? = null
     @Volatile private var running = false
@@ -169,7 +175,9 @@ class AudioMixEngine(
                 // Only meaningful -- and only possible -- when both sources
                 // are live this chunk: with no system-audio reference to
                 // compare against, there's nothing to detect bleed *from*.
-                val micSuppression = if (haveSystem && haveMic) {
+                // Also skipped outright when bleedSuppressor is null
+                // (BleedSuppressionMode.OFF) -- see that property's kdoc.
+                val micSuppression = if (haveSystem && haveMic && bleedSuppressor != null) {
                     for (i in 0 until framesPerChunk) {
                         referenceMono[i] = ((systemBuf[i * 2] + systemBuf[i * 2 + 1]) * 0.5f) / 32768f
                     }
@@ -261,6 +269,39 @@ class AudioMixEngine(
             AudioChannelMode.MONO -> 1
             AudioChannelMode.STEREO -> 2
             AudioChannelMode.AUTO -> if (systemStereoAvailable) 2 else 1
+        }
+
+        /**
+         * Best-effort heuristic for "is system + mic audio about to bleed
+         * acoustically through the device's own speaker" -- i.e. is there
+         * currently *no* wired or Bluetooth output connected that would
+         * otherwise carry playback away from the open air near the mic.
+         * [ResidualBleedSuppressor] is the software mitigation for when this
+         * is true; this is the complementary, zero-cost mitigation of just
+         * telling the person *before* they record, since a headset removes
+         * the acoustic bleed at its physical source rather than cleaning it
+         * up after the fact. Presence of a connected output device is used
+         * as the proxy for "audio is routing there," not the (more precise
+         * but not publicly queryable without an active AudioTrack) currently
+         * -active route -- if a headset is connected at all, Android routes
+         * media there by default in the overwhelming majority of cases. */
+        fun isLikelyUsingBuiltInSpeaker(context: Context): Boolean {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return false
+            val outputs = try {
+                audioManager.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)
+            } catch (e: Exception) {
+                return false
+            }
+            val externalTypes = setOf(
+                android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                android.media.AudioDeviceInfo.TYPE_USB_HEADSET,
+                android.media.AudioDeviceInfo.TYPE_USB_DEVICE,
+                android.media.AudioDeviceInfo.TYPE_HEARING_AID
+            )
+            return outputs.none { it.type in externalTypes }
         }
     }
 }

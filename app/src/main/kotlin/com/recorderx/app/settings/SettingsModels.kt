@@ -74,6 +74,75 @@ enum class BitrateMode(val label: String) {
     CBR("CBR")
 }
 
+/**
+ * Encoder-side sample precision. TEN_BIT only ever changes anything real
+ * when the *content itself* is higher-than-8-bit (an HDR game, an HDR video
+ * played back on-screen) -- MediaProjection mirrors whatever SurfaceFlinger
+ * already composited, which is ordinary 8-bit RGBA8888 for the overwhelming
+ * majority of Android UI/gameplay content today, so 10-bit on that source is
+ * a wider container around the same information, not new detail. It's still
+ * offered because (a) it's a real, correct encoder configuration this app
+ * can honestly provide -- see [com.recorderx.app.codec.CodecSelector] -- and
+ * (b) it's genuinely future-facing as HDR screen content and HDR-aware
+ * capture become more common. `label_color_depth_note` in strings.xml is the
+ * in-UI disclosure of this, matching how [ResolutionOption]'s upscaling case
+ * is disclosed rather than hidden.
+ */
+enum class ColorDepthOption(val label: String) {
+    EIGHT_BIT("8-BIT"),
+    TEN_BIT("10-BIT")
+}
+
+/**
+ * Whether the AV1 cascade may land on a *software* (CPU/libaom-based) AV1
+ * encoder when no hardware AV1 encoder exists, instead of moving straight on
+ * to HEVC/AVC hardware. Off by default: software AV1 is real, but dramatically
+ * slower than any hardware path and meaningfully increases heat/battery use --
+ * exactly the kind of trade-off that should be an explicit opt-in, not a
+ * silent default, for users who specifically want genuine AV1 output over a
+ * different (faster, cooler) codec. See `CodecSelector.findSoftwareAv1Encoder`
+ * for why this is also capped at 1080p regardless of the Resolution picker.
+ */
+enum class Av1SoftwareFallback(val label: String) {
+    OFF("OFF"),
+    ON("ON (CPU, UP TO 1080P)")
+}
+
+/**
+ * How the floating pause/stop bubble trades off "reachable on screen" against
+ * "not in the recording" -- see `overlay/RecordingOverlayController`'s kdoc
+ * for why a normal app can't have both at once. VISIBLE is the original
+ * always-shown-small-and-fading behavior; AUTO_HIDE detaches the window
+ * outright a few seconds after it's shown (same mechanism as the manual eye-
+ * icon hide) so it's reachable only via the notification's "Show controls"
+ * action / the Quick Settings tile, trading reachability for the cleanest
+ * frames a third-party app can offer; BLACKOUT restores `FLAG_SECURE` on the
+ * bubble specifically for users who've decided a small solid-black shape is
+ * preferable to legible controls appearing in their footage.
+ */
+enum class OverlayVisibilityMode(val label: String) {
+    VISIBLE("VISIBLE"),
+    AUTO_HIDE("AUTO-HIDE"),
+    BLACKOUT("BLACKOUT")
+}
+
+/**
+ * Strength of [com.recorderx.app.audio.ResidualBleedSuppressor]'s gain-based
+ * suppression of system audio bleeding back into the mic through the device's
+ * own speaker (see that class's kdoc). NORMAL is the tuned default; STRONG
+ * trades a bit more audible mic-ducking on loud content for a deeper cut on
+ * genuinely bad bleed (a phone speaker at high volume a few cm from the mic,
+ * with no headset) -- exactly the "one explosion sound plays twice" report
+ * this exists to address. OFF disables the second-stage suppressor entirely
+ * (platform AEC, if the device has one, still runs regardless -- see
+ * `MicAudioSource`) for anyone who'd rather tune monitoring manually.
+ */
+enum class BleedSuppressionMode(val label: String) {
+    OFF("OFF"),
+    NORMAL("NORMAL"),
+    STRONG("STRONG")
+}
+
 enum class AudioSourceOption(val label: String, val wantsSystem: Boolean, val wantsMic: Boolean) {
     OFF("OFF", wantsSystem = false, wantsMic = false),
     MIC("MIC", wantsSystem = false, wantsMic = true),
@@ -131,6 +200,8 @@ data class RecordingSettings(
     val bitrateOption: BitrateOption = BitrateOption.AUTO,
     val bitrateMode: BitrateMode = BitrateMode.VBR,
     val advancedBitrateUnlocked: Boolean = false,
+    val colorDepth: ColorDepthOption = ColorDepthOption.EIGHT_BIT,
+    val av1SoftwareFallback: Av1SoftwareFallback = Av1SoftwareFallback.OFF,
 
     val audioSource: AudioSourceOption = AudioSourceOption.SYS_MIC,
     val audioQuality: AudioQualityOption = AudioQualityOption.MID,
@@ -141,7 +212,9 @@ data class RecordingSettings(
     val micLevelPercent: Int = 100,    // 0..200
     val audioMix: AudioMixMode = AudioMixMode.SYSTEM_MIC,
     val audioMonitoring: AudioMonitoringMode = AudioMonitoringMode.OFF,
+    val bleedSuppression: BleedSuppressionMode = BleedSuppressionMode.NORMAL,
 
     val floatingBubbleEnabled: Boolean = true,
+    val overlayVisibility: OverlayVisibilityMode = OverlayVisibilityMode.VISIBLE,
     val outputTemplate: String = "RecorderX_{timestamp}"
 )

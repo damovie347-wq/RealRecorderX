@@ -81,6 +81,17 @@ class VideoEncoderPipeline(
             if (choice.profile != 0) setInteger(MediaFormat.KEY_PROFILE, choice.profile)
             if (choice.level != 0) setInteger(MediaFormat.KEY_LEVEL, choice.level)
 
+            // 10-bit needs no separate handling here beyond the profile line
+            // above: CodecSelector already resolved a Main10-family profile
+            // into choice.profile when ColorDepthOption.TEN_BIT was requested
+            // and achievable, and KEY_COLOR_FORMAT stays COLOR_FormatSurface
+            // either way -- Surface input's format is the same regardless of
+            // sample depth, the codec's internal converter handles the
+            // 8-to-10-bit widening from whatever SurfaceFlinger actually
+            // composited (still 8-bit RGBA8888 for the overwhelming majority
+            // of Android content -- see ColorDepthOption's kdoc for why this
+            // is a wider container, not new detail, outside genuine HDR content).
+
             // Cap the *actual* input rate up front, not just reactively under
             // thermal stress -- see tryLimitInputFrameRate's kdoc for why this
             // is needed at all (KEY_FRAME_RATE alone is a bitrate-calculation

@@ -30,11 +30,15 @@ import com.recorderx.app.settings.AudioChannelMode
 import com.recorderx.app.settings.AudioMonitoringMode
 import com.recorderx.app.settings.AudioQualityOption
 import com.recorderx.app.settings.AudioSourceOption
+import com.recorderx.app.settings.Av1SoftwareFallback
 import com.recorderx.app.settings.BitrateMode
 import com.recorderx.app.settings.BitrateOption
+import com.recorderx.app.settings.BleedSuppressionMode
+import com.recorderx.app.settings.ColorDepthOption
 import com.recorderx.app.settings.FrameRateOption
 import com.recorderx.app.settings.MicGainMode
 import com.recorderx.app.settings.OrientationOption
+import com.recorderx.app.settings.OverlayVisibilityMode
 import com.recorderx.app.settings.RecordingSettings
 import com.recorderx.app.settings.ResolutionOption
 import com.recorderx.app.settings.SettingsRepository
@@ -219,6 +223,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun populateSettings(container: LinearLayout) {
         addFloatingBubbleToggle(container)
+        addEnumSlider(container, getString(R.string.label_overlay_visibility), OverlayVisibilityMode.values(), settings.overlayVisibility, { it.label }) {
+            updateSettings { copy(overlayVisibility = it) }
+        }
+        addNoteText(container, getString(R.string.label_overlay_visibility_note))
 
         addSectionHeader(container, getString(R.string.section_video))
         addEnumSlider(container, getString(R.string.label_video_codec), VideoCodecOption.values(), settings.videoCodec, { it.label }) {
@@ -237,6 +245,16 @@ class MainActivity : AppCompatActivity() {
         addEnumSlider(container, getString(R.string.label_bitrate_mode), BitrateMode.values(), settings.bitrateMode, { it.label }) {
             updateSettings { copy(bitrateMode = it) }
         }
+        addEnumSlider(container, getString(R.string.label_color_depth), ColorDepthOption.values(), settings.colorDepth, { it.label }) {
+            updateSettings { copy(colorDepth = it) }
+            refreshBitrateSuggestion()
+        }
+        addNoteText(container, getString(R.string.label_color_depth_note))
+        addEnumSlider(container, getString(R.string.label_av1_software_fallback), Av1SoftwareFallback.values(), settings.av1SoftwareFallback, { it.label }) {
+            updateSettings { copy(av1SoftwareFallback = it) }
+            refreshBitrateSuggestion()
+        }
+        addNoteText(container, getString(R.string.label_av1_software_fallback_note))
 
         addSectionHeader(container, getString(R.string.section_audio))
         addEnumSlider(container, getString(R.string.label_audio_source), AudioSourceOption.values(), settings.audioSource, { it.label }) {
@@ -268,6 +286,10 @@ class MainActivity : AppCompatActivity() {
         addEnumSlider(container, getString(R.string.label_audio_monitoring), AudioMonitoringMode.values(), settings.audioMonitoring, { it.label }) {
             updateSettings { copy(audioMonitoring = it) }
         }
+        addEnumSlider(container, getString(R.string.label_bleed_suppression), BleedSuppressionMode.values(), settings.bleedSuppression, { it.label }) {
+            updateSettings { copy(bleedSuppression = it) }
+        }
+        addNoteText(container, getString(R.string.label_bleed_suppression_note))
 
         addOutputTemplateBlock(container)
     }
@@ -353,6 +375,21 @@ class MainActivity : AppCompatActivity() {
         slider.onIndexChanged = { idx -> onChange(idx) }
         container.addView(block)
         return Triple(slider, labelsRow, titleView)
+    }
+
+    /** A short, always-visible explanatory line under a slider/toggle whose
+     * effect isn't self-evident from its label alone (e.g. "10-bit only
+     * matters on HDR content," "software AV1 is capped at 1080p") -- the
+     * same honest-disclosure spirit as [resolutionUpscaleLabel], just for
+     * settings where the caveat applies unconditionally rather than only in
+     * some states, so it's static text instead of a toggled-visibility view. */
+    private fun addNoteText(container: LinearLayout, text: String) {
+        container.addView(TextView(this).apply {
+            this.text = text
+            textSize = 11.5f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_secondary))
+            setPadding(0, dp(8), 0, 0)
+        })
     }
 
     private fun buildLabelsRow(labels: List<String>): LinearLayout =
@@ -498,7 +535,10 @@ class MainActivity : AppCompatActivity() {
     private fun refreshBitrateSuggestion() {
         if (!::bitrateSuggestionLabel.isInitialized) return
         val target = ResolutionResolver.resolve(this, settings.resolution, settings.orientation)
-        val choice = CodecSelector.findBestEncoder(settings.videoCodec, target.width, target.height, settings.frameRate.fps)
+        val choice = CodecSelector.findBestEncoder(
+            settings.videoCodec, target.width, target.height, settings.frameRate.fps,
+            settings.colorDepth, settings.av1SoftwareFallback == Av1SoftwareFallback.ON
+        )
         val mime = choice?.mimeType ?: android.media.MediaFormat.MIMETYPE_VIDEO_AVC
         // Use the fps this device can actually sustain at this resolution, not
         // the raw slider value, so the suggestion matches what will really be

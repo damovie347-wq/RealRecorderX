@@ -77,18 +77,32 @@ gradle wrapper --gradle-version 9.5.0 --distribution-type all
 - **Codec:** tries AV1 → HEVC → AVC hardware encoders in that order (capped by
   whatever the user picks, or by a device-tier-aware default — H.264 on
   Android 8/9 and lower-RAM devices), with a software-encoder last resort so
-  recording never just fails outright.
+  recording never just fails outright. If **Software AV1** is explicitly
+  turned on, a CPU-based AV1 encoder (AOSP's libaom-based path, where present)
+  is tried right after hardware AV1 and before falling to HEVC/AVC — capped at
+  1080p and a conservative fps, since software encode throughput is nowhere
+  near a hardware block's. **Color depth** (8-bit / 10-bit) is also
+  selectable; 10-bit only requests a genuine Main10-family encoder profile and
+  falls back to 8-bit with a toast if nothing in the cascade can actually do
+  it — see `codec/CodecSelector.kt`.
 - **Audio:** system playback capture (Android 10+) and the microphone are two
   *entirely separate* `AudioRecord` instances, mixed in-app with independent
-  levels, a soft-knee limiter, optional voice-priority ducking, and platform
-  echo cancellation / noise suppression on the mic path.
-- **Controls:** the floating pause/stop bubble is a second, `FLAG_SECURE`
-  window, never part of any view MediaProjection could capture — see
-  `overlay/RecordingOverlayController.kt`. It starts collapsed to a small
-  40dp draggable dot and only expands to the full control row on tap, so it
-  stays out of the way during recording and, in the worst case, only a small
-  shape (not a large rectangle) can ever appear on OEM skins where
-  `FLAG_SECURE` renders as solid black instead of being fully excluded.
+  levels, a soft-knee limiter, optional voice-priority ducking, platform echo
+  cancellation / noise suppression on the mic path, and a second-stage
+  correlation-based bleed suppressor (`audio/ResidualBleedSuppressor.kt`,
+  strength adjustable: Off/Normal/Strong) for when system audio played
+  through the phone's own speaker leaks back into the mic.
+- **Controls:** the floating pause/stop bubble is a small, translucent,
+  low-opacity-when-idle window — see `overlay/RecordingOverlayController.kt`
+  for why it's deliberately *not* `FLAG_SECURE` by default (that renders as a
+  solid black shape in the recording, not a clean omission). **Bubble
+  Visibility** offers three modes: VISIBLE (default), AUTO-HIDE (detaches
+  itself a few seconds after showing — reachable afterward from the
+  notification's "Show controls" action or the Quick Settings tile), and
+  BLACKOUT (opts back into `FLAG_SECURE` for anyone who'd rather have a small
+  black shape than legible controls in their footage). No mode makes the
+  bubble both live-visible *and* invisible to this app's own recording at
+  once — see that file's kdoc for why no third-party app can do that.
 - **Quick Settings tile:** `service/RecordingTileService.kt` adds a shade
   shortcut (add it once via the shade's "Edit tiles" pencil icon, like any
   third-party tile) — stops a running recording with no Activity needed, or
@@ -270,6 +284,51 @@ adb logcat *:E | grep -A 30 "FATAL EXCEPTION"
    `RecordingService` can toast a clear explanation whenever what was
    captured doesn't match what was requested, rather than a silently quiet
    recording.
+
+8. **"High resolution/bitrate picked, still not sharp, especially partway
+   through a long gaming session."** No single cause, and one of them isn't
+   fixable — see `ARCHITECTURE.md` §11 for what earlier rounds already
+   addressed (profile/level, the actual fps-capability mismatch, real
+   upscaling-from-panel disclosure). What was still missing: `ThermalBitrateGovernor`
+   silently cuts the live bitrate under real thermal pressure (by design —
+   it's the actual mechanism keeping the device from overheating during a
+   long, hot recording), but nothing ever told the user *why* a recording
+   got visibly softer partway through, which reads exactly like "I picked
+   high quality and it's still not sharp" if you don't know the device
+   warmed up. `RecordingService` now toasts when combined throttling crosses
+   a real threshold, and again when it fully recovers.
+9. **"System audio + mic still echoes/doubles, especially loud transients
+   like an explosion."** `ResidualBleedSuppressor`'s original tuning (20dB
+   ceiling, 60ms attack) was too gentle for a loud, percussive sound played
+   through the phone's own speaker with no headset — the attack was slow
+   enough that a short transient was already mostly through before
+   suppression caught up. Retuned (26dB/35ms at the new NORMAL default, 34dB/
+   20ms at the new STRONG option a person can pick if their content/device
+   still isn't clean) and exposed as a Mic Bleed Suppression setting instead
+   of one fixed, unadjustable value. `RecordingService` also now suggests a
+   headset once (not every session) when it detects Sys+Mic recording with no
+   external audio output connected — the bleed's actual physical source,
+   which software suppression can only clean up after the fact, not remove.
+10. **"Recording controls appear live but shouldn't be baked into the video,
+    like Samsung's recorder."** Confirmed again, not just repeated: still no
+    public API lets a normal app keep its own overlay both live-visible and
+    cleanly excluded from its own `MediaProjection` capture — see
+    `ARCHITECTURE.md` §7. What's new is giving the person the actual trade-off
+    directly instead of one fixed compromise: a **Bubble Visibility** setting
+    (`OverlayVisibilityMode`) with VISIBLE / AUTO-HIDE / BLACKOUT, so whoever's
+    recording can pick which cost they'd rather pay.
+11. **"AV1 recording does nothing on a device without hardware AV1."**
+    `CodecSelector.findBestEncoder`'s cascade only ever searched for a
+    *hardware* encoder at every mime, and its one non-hardware attempt was
+    always AVC — so a device with a genuine software AV1 path (AOSP's
+    libaom-based encoder, present on Android 14+ with an updated media
+    module) was never actually tried. A new, explicitly opt-in **Software AV1**
+    setting inserts that missing attempt right after hardware AV1, capped at
+    1080p and a conservative fps to stay realistic about CPU-bound encode
+    throughput. A separate **Color Depth** (8-bit/10-bit) setting was added
+    alongside it, requesting a genuine Main10-family encoder profile and
+    falling back to 8-bit (with a toast) rather than silently recording 8-bit
+    content under a 10-bit label.
 
 That output pinpoints the exact class/line, which turns "the app crashes"
 into a five-minute fix instead of a guessing game.

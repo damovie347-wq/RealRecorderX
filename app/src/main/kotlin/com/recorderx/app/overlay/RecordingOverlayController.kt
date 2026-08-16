@@ -22,7 +22,7 @@ import kotlin.math.abs
 /**
  * A small always-on-top control bubble for pause/resume/stop while recording.
  *
- * ## Why this isn't (and can't be) `FLAG_SECURE`
+ * ## Why this isn't `FLAG_SECURE` by default
  *
  * An earlier version of this bubble used `WindowManager.LayoutParams.FLAG_SECURE`,
  * reasoning that it's the platform mechanism for excluding a window from
@@ -33,11 +33,12 @@ import kotlin.math.abs
  * secure window's bounds as a solid black shape, not to cleanly omit it and
  * reveal whatever is underneath. That's exactly right for its actual purpose
  * (make sure a banking PIN pad can never leak into a capture, screen-mirror,
- * or Recents thumbnail, full stop) and exactly wrong for this one (a small
- * piece of *this app's own* chrome that should just not be part of the
- * recording, without covering the content behind it in black). The visible
- * black dot/rectangle this generated in recordings -- "siyah bir nokta" --
- * was that mechanism working as documented, not a bug in the platform.
+ * or Recents thumbnail, full stop) and exactly wrong for the *default* case
+ * here (a small piece of *this app's own* chrome that should just not be
+ * part of the recording, without covering the content behind it in black).
+ * The visible black dot/rectangle this generated in recordings -- "siyah bir
+ * nokta" -- was that mechanism working as documented, not a bug in the
+ * platform.
  *
  * There is no public API that lets a normal (non-system, non-privileged) app
  * make its own overlay simultaneously (a) visible live on screen and
@@ -46,31 +47,41 @@ import kotlin.math.abs
  * because it's a privileged system component with capture-pipeline access a
  * third-party APK is never granted. Mainstream third-party recorders (XRecorder,
  * ADV Screen Recorder, etc.) don't fake this either -- they ship the same
- * two mitigations below, because that combination is the actual, honest
- * ceiling for what a normal app can do here.
+ * mitigations below, because that combination is the actual, honest ceiling
+ * for what a normal app can do here.
  *
- * ## What this does instead
+ * ## What this offers instead -- three modes, [OverlayVisibilityMode]
  *
- * 1. No `FLAG_SECURE` -- so there is no black shape, ever, under any OEM
- *    compositor. The window is a completely ordinary, small, translucent
- *    overlay (see [setExpanded] / `overlay_recording_controls.xml`): a
- *    ~16dp dot at rest, far smaller and far less visually intrusive than
- *    either the old dark 40dp collapsed circle or a `FLAG_SECURE` black box
- *    would have been if it *does* end up in a frame.
- * 2. A genuine **hide** action (the eye icon on the expanded row) that fully
- *    detaches this window from `WindowManager` -- not shrunk, not
- *    transparent, actually removed -- for whenever a completely clean frame
- *    matters more than having the controls reachable on-screen. `RecordingService`
- *    adds a "Show controls" action to the persistent recording notification
- *    while hidden this way, since the bubble obviously can't offer its own
- *    "bring me back" tap target once it's gone.
- * 3. An automatic idle fade: after [IDLE_FADE_DELAY_MS] with no touch, the
- *    bubble eases down to [IDLE_ALPHA] opacity and stays there until touched
- *    again. It's still technically part of every frame captured while idle,
- *    but far less visually intrusive than sitting at full opacity for the
- *    entire recording when in practice the user only actually touches it
- *    twice (pause, stop) -- a real, if partial, reduction in how much of the
- *    recording it's actually noticeable in, on top of (1) and (2) above.
+ * 1. **VISIBLE** (default): no `FLAG_SECURE` -- so there is no black shape,
+ *    ever, under any OEM compositor. The window is a completely ordinary,
+ *    small, translucent overlay (see [setExpanded] / `overlay_recording_controls.xml`):
+ *    a ~16dp dot at rest. Combined with the automatic idle fade below, this
+ *    is the least visually intrusive option *when* it does end up in a frame.
+ * 2. **AUTO_HIDE**: same window, but `RecordingService` detaches it a few
+ *    seconds after it's shown (see `RecordingService.scheduleAutoHide`),
+ *    exactly as if the eye icon had been tapped -- reachable afterward only
+ *    via the notification's "Show controls" action or the Quick Settings
+ *    tile. The cleanest frames this app can offer, traded for the bubble not
+ *    being an on-screen tap target most of the time.
+ * 3. **BLACKOUT**: restores `FLAG_SECURE` on this window specifically, for
+ *    anyone who's decided a small solid-black shape is preferable to legible
+ *    controls appearing in their footage -- the trade-off the app defaulted
+ *    away from above, now opt-in rather than forced either way.
+ *
+ * On top of whichever mode is active:
+ * - A genuine **hide** action (the eye icon on the expanded row) that fully
+ *   detaches this window from `WindowManager` -- not shrunk, not
+ *   transparent, actually removed -- for whenever a completely clean frame
+ *   matters more than having the controls reachable on-screen. `RecordingService`
+ *   adds a "Show controls" action to the persistent recording notification
+ *   while hidden this way, since the bubble obviously can't offer its own
+ *   "bring me back" tap target once it's gone.
+ * - An automatic idle fade: after [IDLE_FADE_DELAY_MS] with no touch, the
+ *   bubble eases down to [IDLE_ALPHA] opacity and stays there until touched
+ *   again. It's still technically part of every frame captured while idle
+ *   (VISIBLE mode) or blacked out (BLACKOUT mode), but far less visually
+ *   intrusive than sitting at full opacity for the entire recording when in
+ *   practice the user only actually touches it twice (pause, stop).
  */
 class RecordingOverlayController(private val context: Context) {
 
@@ -91,7 +102,12 @@ class RecordingOverlayController(private val context: Context) {
 
     fun isShown(): Boolean = rootView != null
 
-    fun show(onTogglePauseResume: () -> Unit, onStop: () -> Unit, onHide: () -> Unit) {
+    /** [blackout] applies [WindowManager.LayoutParams.FLAG_SECURE] to this
+     * window specifically -- see the class kdoc's mode 3. Left `false` for
+     * VISIBLE and AUTO_HIDE, both of which only differ in *when*
+     * `RecordingService` calls [hide], not in how this window itself is
+     * built. */
+    fun show(blackout: Boolean = false, onTogglePauseResume: () -> Unit, onStop: () -> Unit, onHide: () -> Unit) {
         if (rootView != null) return
         if (!Settings.canDrawOverlays(context)) return
 
@@ -106,11 +122,14 @@ class RecordingOverlayController(private val context: Context) {
         view.findViewById<ImageButton>(R.id.btnHide).setOnClickListener { onHide() }
         view.findViewById<ImageButton>(R.id.btnCollapse).setOnClickListener { setExpanded(false) }
 
+        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        if (blackout) flags = flags or WindowManager.LayoutParams.FLAG_SECURE
+
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            flags,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.END
