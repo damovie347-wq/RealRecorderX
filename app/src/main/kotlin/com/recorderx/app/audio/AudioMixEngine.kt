@@ -36,8 +36,43 @@ class AudioMixEngine(
      * overlapping the timestamps of audio already written before the pause --
      * see RecordingService#resumeInternal. */
     private val startFrameOffset: Long = 0L,
+    /** Same [System.nanoTime] reading RecordingService.beginPipelines() takes
+     * before constructing *either* pipeline (see
+     * [com.recorderx.app.encoder.VideoEncoderPipeline]'s `sessionBaseUs`
+     * kdoc for the full "why": without a shared reference point, video and
+     * audio each independently started their own PTS timeline at 0 from
+     * whenever *they personally* got going, which -- since audio's
+     * AudioRecord/effects setup only begins once the entire video path is
+     * already constructed -- produced a constant, uncorrected audio/video
+     * offset on every recording). Only consulted when [resumeFromPtsOffsetUs]
+     * is null; see that parameter for the resumed case. */
+    private val recordingEpochNs: Long = 0L,
+    /** On a resumed segment, the original (first-segment) [ptsOffsetUs]
+     * value, passed back in so this instance reuses it verbatim instead of
+     * measuring its own gap against [recordingEpochNs] again -- recomputing
+     * on resume would double-count the (mostly-paused) wall-clock gap since
+     * the session actually began, since [startFrameOffset] already carries
+     * PTS continuity forward on its own. Null on a fresh, non-resumed
+     * segment, which computes and exposes its own [ptsOffsetUs] instead --
+     * see RecordingService#startAudioPipeline / #resumeInternal for how the
+     * two call sites differ here. */
+    private val resumeFromPtsOffsetUs: Long? = null,
     private val onError: (Throwable) -> Unit
 ) {
+    /** The fixed PTS bias actually in use once [start] has returned `true` --
+     * either [resumeFromPtsOffsetUs] verbatim, or (on a fresh segment) the
+     * real gap between [recordingEpochNs] and the moment [start] finished
+     * setting up AudioRecord/effects and was about to spawn the mix loop
+     * thread, which is audio's genuine zero-point moment (not any earlier
+     * one -- the AudioRecord/effect construction inside [start] is itself
+     * real, non-instant setup time). Resolved synchronously inside [start],
+     * strictly before the mix loop thread is spawned, so a caller reading
+     * this right after a successful [start] call always sees the real value,
+     * never a stale default -- and so RecordingService can remember it (see
+     * its `audioPtsOffsetUs` field) for any later resumed instance to pass
+     * back in as [resumeFromPtsOffsetUs]. */
+    @Volatile var ptsOffsetUs: Long = resumeFromPtsOffsetUs ?: 0L
+        private set
     private var systemSource: SystemAudioSource? = null
     private var micSource: MicAudioSource? = null
     private val ducking = DuckingProcessor(settings.voicePriority)
@@ -130,6 +165,13 @@ class AudioMixEngine(
             return false
         }
 
+        // Resolved here -- after the AudioRecord/effect construction above
+        // has actually finished, immediately before the mix loop thread
+        // (which starts reading real audio right away) is spawned -- see
+        // [ptsOffsetUs]'s kdoc for why this specific moment is audio's true
+        // "frame 0" reference point, not any earlier one.
+        ptsOffsetUs = resumeFromPtsOffsetUs ?: ((System.nanoTime() - recordingEpochNs) / 1_000L)
+
         running = true
         val t = Thread({ mixLoop() }, "RecorderX-AudioMixer")
         mixThread = t
@@ -191,7 +233,7 @@ class AudioMixEngine(
                     else -> mixToStereo(systemBuf, haveSystem, micBuf, haveMic, outBuf, framesPerChunk, systemLevel * duckGain, micLevel * micSuppression)
                 }
 
-                val presentationTimeUs = framesWritten * 1_000_000L / sampleRate
+                val presentationTimeUs = ptsOffsetUs + framesWritten * 1_000_000L / sampleRate
                 audioEncoder.feedPcm(outBuf, outBuf.size, presentationTimeUs)
                 framesWritten += framesPerChunk
                 totalFramesWritten = framesWritten

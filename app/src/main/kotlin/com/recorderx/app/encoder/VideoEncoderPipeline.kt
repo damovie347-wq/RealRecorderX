@@ -20,6 +20,16 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class VideoEncoderPipeline(
     private val muxerController: MuxerController,
+    /** Same [System.nanoTime] reading RecordingService.beginPipelines() takes
+     * before constructing *either* pipeline, and the same value it hands to
+     * the audio side's PTS offset (see AudioMixEngine's [ptsOffsetUs][
+     * com.recorderx.app.audio.AudioMixEngine] parameter) -- this is what
+     * lets the two independently-threaded pipelines agree on a single
+     * "recording actually started here" instant instead of each quietly
+     * picking its own. See [sessionBaseUs]'s kdoc for why that agreement is
+     * the whole fix for a real, previously-uncorrected audio/video sync
+     * offset. */
+    recordingEpochNs: Long,
     private val onError: (Throwable) -> Unit
 ) {
     private lateinit var codec: MediaCodec
@@ -34,14 +44,33 @@ class VideoEncoderPipeline(
     private val bytesSinceLastSample = AtomicLong(0)
 
     // Surface-input frames arrive with whatever timestamp SurfaceFlinger
-    // stamped on them -- typically nanoseconds since *boot*, not since this
-    // recording started. Left unrebased, the muxer ends up with a video
-    // track whose PTS values are enormous (hours), which is exactly what
-    // produced garbage durations like "222:03:25" in players/galleries.
-    // Rebasing every sample against the first real frame's timestamp fixes
-    // this; audio's PTS is already computed relative to 0 on the input side
-    // (see AudioMixEngine), so only video needs this correction.
-    private var sessionBaseUs: Long = -1L
+    // stamped on them -- boot-relative monotonic nanoseconds, same domain as
+    // System.nanoTime() (see FramePacer's kdoc). Left unrebased, the muxer
+    // ends up with a video track whose PTS values are enormous (hours),
+    // which is exactly what produced garbage durations like "222:03:25" in
+    // players/galleries.
+    //
+    // Fixed to [recordingEpochNs] (converted to microseconds) rather than
+    // lazily latched onto the first frame's own raw timestamp, which is what
+    // this used to do. That earlier approach rebased video to start at
+    // PTS=0 on its own first frame while AudioMixEngine, on a completely
+    // independent thread, separately started *its* PTS timeline at 0 from
+    // whenever its own mix loop happened to start -- and per
+    // RecordingService.beginPipelines()'s actual call order, audio's
+    // AudioRecord/effects setup only begins *after* the video encoder,
+    // FramePacer, VirtualDisplay and ThermalBitrateGovernor are already
+    // constructed, so that "own first sample = 0" moment reliably landed
+    // tens to hundreds of ms later in real time than video's. Two timelines
+    // with two different, uncorrelated zero points is a constant, guaranteed
+    // audio/video offset on every single recording -- the actual mechanism
+    // behind "sesle video senkron değil, ses gecikiyor gibi." Rebasing both
+    // against the *same* real instant instead fixes it: the first video
+    // frame now lands at whatever small positive PTS reflects its genuine
+    // capture-pipeline startup latency (harmless -- players handle a video
+    // track's first sample not being at exactly 0 without issue), and that
+    // latency is now directly comparable with audio's own startup latency
+    // instead of both being independently clamped to a misleading 0.
+    private val sessionBaseUs: Long = recordingEpochNs / 1_000L
 
     // Pause/resume releases and later recreates the VirtualDisplay against the
     // same input Surface (see RecordingService#pauseInternal), but the *raw*
@@ -52,6 +81,7 @@ class VideoEncoderPipeline(
     private var pauseOffsetUs: Long = 0L
     private var lastEmittedPtsUs: Long = -1L
     @Volatile private var awaitingResumeRebase = false
+    @Volatile private var firstFrameLogged = false
 
     fun configure(choice: CodecChoice, bitrate: Int, fps: Int, bitrateMode: BitrateMode): Surface {
         val format = MediaFormat.createVideoFormat(choice.mimeType, choice.width, choice.height).apply {
@@ -169,9 +199,11 @@ class VideoEncoderPipeline(
                             bufferInfo.size = 0
                         }
                         if (bufferInfo.size != 0) {
-                            if (sessionBaseUs < 0) {
-                                sessionBaseUs = bufferInfo.presentationTimeUs
-                                Log.i(TAG, "First video frame PTS=$sessionBaseUs us (boot-relative) -- rebasing track to start at 0")
+                            if (!firstFrameLogged) {
+                                firstFrameLogged = true
+                                Log.i(TAG, "First video frame raw=${bufferInfo.presentationTimeUs}us " +
+                                    "epochBase=${sessionBaseUs}us -> startup latency=" +
+                                    "${bufferInfo.presentationTimeUs - sessionBaseUs}us")
                             }
                             val rawRelativeUs = bufferInfo.presentationTimeUs - sessionBaseUs
 

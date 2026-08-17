@@ -13,6 +13,18 @@ import android.media.MediaFormat
  * not the user's preference -- if AV1 was requested but the device fell back
  * to AVC hardware, the suggestion should reflect AVC's lower efficiency, not
  * the codec that never actually got used.
+ *
+ * These constants were raised from an earlier, noticeably lower ladder
+ * (AVC 0.085 / HEVC 0.055 / AV1 0.038) that was the actual mechanism behind
+ * "2K/4K seçtim ama cam gibi net görüntü alamıyorum": that ladder produced,
+ * e.g., ~21 Mbps for 4K30 AVC and ~9.5 Mbps for 4K30 AV1 -- both well under
+ * what real screen/gameplay content (text edges, UI motion) needs to stay
+ * artifact-free at those resolutions, *even with* the profile/level fix
+ * below correctly unlocking the encoder's full toolset. A high enough
+ * profile/level only raises the *ceiling* KEY_BIT_RATE is allowed to reach;
+ * it was never what set the actual target low in the first place. The
+ * values below land 4K30 AVC around ~35 Mbps / AV1 around ~16 Mbps, in line
+ * with what other high-quality screen/gameplay recorders target.
  */
 object BitrateAdvisor {
 
@@ -20,9 +32,9 @@ object BitrateAdvisor {
     private const val MAX_BITRATE_BPS = 120_000_000
 
     private fun bitsPerPixel(mimeType: String): Double = when (mimeType) {
-        MediaFormat.MIMETYPE_VIDEO_AV1 -> 0.038
-        MediaFormat.MIMETYPE_VIDEO_HEVC -> 0.055
-        else -> 0.085 // AVC, or anything unrecognized -- assume the least efficient case
+        MediaFormat.MIMETYPE_VIDEO_AV1 -> 0.065
+        MediaFormat.MIMETYPE_VIDEO_HEVC -> 0.090
+        else -> 0.140 // AVC, or anything unrecognized -- assume the least efficient case
     }
 
     /**

@@ -78,6 +78,15 @@ class RecordingService : Service() {
     private var pausedAccumulatedMs = 0L
     private var audioFrameOffset = 0L
 
+    // Computed exactly once, in startAudioPipeline() during the *first*
+    // (non-resumed) beginPipelines() call of a session, as the real-time gap
+    // between recordingEpochNs and the moment that first AudioMixEngine's mix
+    // loop actually starts. Every resumed AudioMixEngine instance afterward
+    // (see resumeInternal) reuses this exact same value rather than
+    // recomputing it -- see AudioMixEngine's ptsOffsetUs kdoc for why
+    // recomputing on resume would double-count the paused wall-clock gap.
+    private var audioPtsOffsetUs = 0L
+
     // Tracks whether the user explicitly hid the floating control bubble
     // (RecordingOverlayController#hide via the overlay's own "eye" button) as
     // opposed to it simply never having been enabled in settings -- drives
@@ -187,7 +196,46 @@ class RecordingService : Service() {
         mainHandler.post(tickRunnable)
     }
 
+    /**
+     * Thin wrapper around [beginPipelinesOrThrow]: every MediaCodec/EGL/
+     * AudioRecord setup call inside it is a real device/vendor-driver
+     * boundary, and capability checks (MediaCodecList, VideoCapabilities,
+     * profileLevels, colorFormats) don't *guarantee* configure()/
+     * createInputSurface()/start() will actually succeed for a given
+     * combination on every chipset -- AV1 in particular, being newer and far
+     * less uniformly implemented than AVC/HEVC, is known to reject
+     * configurations its own MediaCodecList entry advertised as supported.
+     * That used to be an uncaught exception on this Service's main thread,
+     * i.e. exactly "AV1 kodek ile kayıt yapmak istediğim zaman uygulama
+     * çöküyor." Runtime failures *after* a successful start were already
+     * safe (each pipeline's drain loop has its own try/catch routing into
+     * onError/handleFatalError -- see VideoEncoderPipeline/AudioEncoderPipeline);
+     * this closes the matching gap at setup time, so any such failure now
+     * ends in the same "couldn't start recording" toast every other setup
+     * failure in this function already produces, with whatever partial
+     * pipeline state got created cleaned up by teardownAfterFailedStart(),
+     * instead of taking the whole app down.
+     */
     private fun beginPipelines(): Boolean {
+        return try {
+            beginPipelinesOrThrow()
+        } catch (t: Throwable) {
+            Log.e(TAG, "beginPipelines(): pipeline setup threw", t)
+            false
+        }
+    }
+
+    private fun beginPipelinesOrThrow(): Boolean {
+        // Captured before *anything* else below -- both this pipeline and
+        // the audio one (see startAudioPipeline) rebase their presentation
+        // timestamps against this exact same instant, which is the entire
+        // fix for the audio/video sync offset described on
+        // VideoEncoderPipeline's sessionBaseUs. Must stay the very first
+        // line here: its whole value is being a fixed point captured before
+        // either pipeline's own (unequal) setup latency has had a chance to
+        // start accruing.
+        val recordingEpochNs = System.nanoTime()
+
         val output = RecordingOutputResolver.createOutputTarget(this, currentSettings.outputTemplate) ?: return false
         outputTarget = output
 
@@ -218,7 +266,7 @@ class RecordingService : Service() {
             currentSettings.bitrateOption.bps
         }
 
-        val video = VideoEncoderPipeline(muxer) { t -> handleFatalError(t) }
+        val video = VideoEncoderPipeline(muxer, recordingEpochNs) { t -> handleFatalError(t) }
         val surface = video.configure(codecChoice, bitrateBps, effectiveFps, currentSettings.bitrateMode)
         resolvedCaptureWidth = codecChoice.width
         resolvedCaptureHeight = codecChoice.height
@@ -254,7 +302,7 @@ class RecordingService : Service() {
         governor.start()
         thermalGovernor = governor
 
-        if (wantsAudio) startAudioPipeline(muxer)
+        if (wantsAudio) startAudioPipeline(muxer, recordingEpochNs)
 
         return true
     }
@@ -378,7 +426,7 @@ class RecordingService : Service() {
         }
     }
 
-    private fun startAudioPipeline(muxer: MuxerController) {
+    private fun startAudioPipeline(muxer: MuxerController, recordingEpochNs: Long) {
         val wantsSystemAudio = currentSettings.audioSource.wantsSystem && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
         val channelCount = AudioMixEngine.resolveChannelCount(currentSettings.audioChannel, wantsSystemAudio)
 
@@ -393,10 +441,17 @@ class RecordingService : Service() {
             settings = currentSettings,
             audioEncoder = encoder,
             sampleRate = resolvedSampleRate,
+            recordingEpochNs = recordingEpochNs,
             onError = { t -> handleFatalError(t) }
         )
         if (mixer.start()) {
             audioMixEngine = mixer
+            // See AudioMixEngine.ptsOffsetUs kdoc: mixer.start() has already
+            // resolved the real value by the time it returns true. Stored
+            // here so resumeInternal() can pass this exact same value back
+            // in on every later resumed instance, instead of each one
+            // measuring its own (wrong, double-counted) gap.
+            audioPtsOffsetUs = mixer.ptsOffsetUs
         } else {
             // See MuxerController kdoc: this still lets the encoder reach a
             // valid EOS (format info is emitted before real data is required),
@@ -481,6 +536,11 @@ class RecordingService : Service() {
                 audioEncoder = encoder,
                 sampleRate = resolvedSampleRate,
                 startFrameOffset = audioFrameOffset,
+                // Reuses the value startAudioPipeline() resolved once for
+                // this whole session -- see AudioMixEngine.ptsOffsetUs'
+                // kdoc for why recomputing this on every resume (against
+                // "now") would be wrong.
+                resumeFromPtsOffsetUs = audioPtsOffsetUs,
                 onError = { t -> handleFatalError(t) }
             )
             if (mixer.start()) audioMixEngine = mixer
@@ -538,16 +598,42 @@ class RecordingService : Service() {
         stopSelf()
     }
 
+    /**
+     * Releases whatever *partial* pipeline state a failed beginPipelines()
+     * attempt did manage to create before hitting the failure point --
+     * important now that beginPipelines() can fail partway through (an
+     * exception from, say, FramePacer/EGL setup or startAudioPipeline()
+     * after the video encoder already configured successfully -- see
+     * beginPipelines' kdoc), not just at its very first steps. Mirrors
+     * handleStop()'s cleanup order/calls; the pieces that don't apply to a
+     * recording that never really started (finalizing an output URI,
+     * hiding an overlay that beginPipelines() never got far enough to show)
+     * are simply omitted.
+     */
     private fun teardownAfterFailedStart() {
+        captureController?.stop()
+        captureController = null
+        framePacer?.release()
+        framePacer = null
+        thermalGovernor?.stop()
+        thermalGovernor = null
+        audioMixEngine?.stop()
+        audioMixEngine = null
+        try { videoEncoder?.requestStop() } catch (e: Exception) { /* codec may never have reached a state that accepts this */ }
+        try { audioEncoder?.requestStop() } catch (e: Exception) { /* same */ }
+        videoEncoder?.awaitFinished(1000)
+        audioEncoder?.awaitFinished(1000)
+        videoEncoder = null
+        audioEncoder = null
+        muxerController?.release()
+        muxerController = null
+
         try {
             mediaProjectionCallback?.let { mediaProjection?.unregisterCallback(it) }
         } catch (e: Exception) { /* nothing registered yet */ }
-        captureController?.stop()
-        framePacer?.release()
-        framePacer = null
         mediaProjection?.stop()
         mediaProjection = null
-        muxerController?.release()
+
         RecordingSessionState.update(RecordingSessionState.Phase.IDLE, 0)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()

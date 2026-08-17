@@ -239,6 +239,27 @@ object CodecSelector {
                 continue
             }
             val videoCaps = capabilities.videoCapabilities ?: continue
+
+            // This app's whole capture pipeline is Surface-input only (see
+            // VideoEncoderPipeline's kdoc: MediaProjection -> FramePacer ->
+            // the encoder's own createInputSurface(), zero CPU-side pixel
+            // copies anywhere). A candidate that doesn't list
+            // COLOR_FormatSurface among its supported color formats can't
+            // actually back that, even when its mime/resolution/profile all
+            // check out -- createInputSurface() throws on it. This is the
+            // actual mechanism behind "AV1 kodek ile kayıt yapmak istediğim
+            // zaman uygulama çöküyor" for CPU-based (software) AV1
+            // specifically: Android's software AV1 encoder is a Codec2
+            // "Linear" (buffer-only) component on many builds, never
+            // Surface/Graphic, so it used to get picked here anyway and only
+            // failed once VideoEncoderPipeline actually tried to configure()
+            // it. Checked once, right alongside the resolution and
+            // profile/level checks below, so a candidate like that is simply
+            // skipped during selection -- the cascade continues to the next
+            // candidate/mime instead of crashing on one that was never
+            // usable by this pipeline to begin with.
+            if (!capabilities.colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)) continue
+
             val (adjW, adjH) = alignToSupportedSize(videoCaps, w, h) ?: continue
             if (!videoCaps.isSizeSupported(adjW, adjH)) continue
 
